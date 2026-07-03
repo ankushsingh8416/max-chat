@@ -32,9 +32,13 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
+
+# sync pipeline local resume checkpoint (see lib/sync/checkpoint.ts)
+.sync-checkpoint.json
 
 # typescript
 *.tsbuildinfo
