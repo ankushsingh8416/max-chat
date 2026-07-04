@@ -1,42 +1,42 @@
 /**
- * Truncated exponential backoff with jitter, for retrying transient Gemini
- * API failures (429/500/503). When Google's error response includes a
- * `RetryInfo.retryDelay` (it does for quota errors — e.g. "Please retry in
- * 57s"), that value is used verbatim instead of the calculated backoff,
- * since the API is telling us exactly how long the underlying limit needs to
- * clear. The calculated backoff is only a fallback for errors that don't
- * carry one (plain 500s, network blips).
+ * Truncated exponential backoff with jitter, for retrying transient OpenAI
+ * API failures (429/500/503). When OpenAI's response includes a
+ * `Retry-After` header, that value is used verbatim instead of the
+ * calculated backoff, since the API is telling us exactly how long the
+ * underlying limit needs to clear. The calculated backoff is only a
+ * fallback for errors that don't carry one (plain 500s, network blips).
  *
- * One quota is never worth retrying at all: a *daily* request-count cap
- * (quotaId containing "PerDay") won't clear in the ~60s Google's retryDelay
- * suggests — that field is written for per-minute limits and is misleading
- * here. Those errors are treated as non-retryable so a caller fails in
+ * A billing/plan-level quota (`error.code === "insufficient_quota"`) is
+ * never worth retrying at all — it won't clear within any backoff we'd wait
+ * for. Those errors are treated as non-retryable so a caller fails in
  * milliseconds instead of minutes; see `isDailyQuotaExhaustedError` below,
  * which lib/sync/sync-runner.ts uses to stop a whole sync run early instead
- * of grinding through every remaining page's retry budget for nothing.
+ * of grinding through every remaining page's retry budget for nothing. A
+ * plain `rate_limit_exceeded` (per-minute/per-day request or token limit) is
+ * still retryable/rotatable, since it clears on its own or on a key switch.
  */
 
 export interface RetryOptions {
   maxRetries: number;
   maxBackoffMs: number;
-  /** Base delay for attempt 1 before doubling; ignored once retryDelay is present. */
+  /** Base delay for attempt 1 before doubling; ignored once a Retry-After header is present. */
   baseDelayMs?: number;
   onRetry?: (attempt: number, waitMs: number, err: unknown) => void;
 }
 
-interface ParsedGoogleError {
+interface ParsedApiError {
   status?: number;
   retryDelayMs?: number;
-  isDailyQuotaExhausted: boolean;
+  isQuotaExhausted: boolean;
 }
 
 /**
- * The `ai` package's `streamText`/`generateText` wrap repeated failures in a
- * `RetryError` (`.reason: 'maxRetriesExceeded'`, `.lastError`, `.errors[]`)
- * after exhausting their own internal same-key retries — that wrapper has no
- * `.status`/`.statusCode` of its own, so status/quota checks below would
- * silently see nothing and treat it as non-retryable/non-rotatable unless
- * unwrapped down to the real underlying API error first.
+ * The `ai` package's `streamText`/`generateText`/`embedMany` wrap repeated
+ * failures in a `RetryError` (`.reason: 'maxRetriesExceeded'`, `.lastError`,
+ * `.errors[]`) after exhausting their own internal same-key retries — that
+ * wrapper has no `.statusCode` of its own, so status/quota checks below
+ * would silently see nothing unless unwrapped down to the real underlying
+ * API error first.
  */
 function unwrapError(err: unknown): unknown {
   const lastError = (err as { lastError?: unknown } | null)?.lastError;
@@ -45,23 +45,13 @@ function unwrapError(err: unknown): unknown {
 }
 
 /**
- * Two different SDKs in this codebase wrap the same underlying Gemini error
- * body differently:
- * - `@google/genai`'s `ApiError` (used for embeddings) sets `.status` to the
- *   HTTP status code and `.message` to `JSON.stringify(fullErrorBody)`.
- * - The `ai` package's `AI_APICallError` (used for chat via `@ai-sdk/google`)
- *   sets `.statusCode`, and the JSON body lives in `.responseBody` (a string)
- *   or already-parsed in `.data.error` — `.message` there is just a plain
- *   human-readable sentence, not JSON.
- * This tries every shape so the same retry/rotation logic works for both.
+ * The `ai` package's `AI_APICallError` (used for both chat and embeddings
+ * via `@ai-sdk/openai`) sets `.statusCode`, and the JSON error body lives in
+ * `.responseBody` (a string) or already-parsed in `.data.error`. OpenAI's
+ * body shape is flat: `{ error: { message, type, code } }` — no nested
+ * details array the way Google's did.
  */
-function getErrorBody(err: Error): { error?: { code?: number; details?: unknown[] } } | undefined {
-  try {
-    return JSON.parse(err.message);
-  } catch {
-    // not the @google/genai shape — fall through
-  }
-
+function getErrorBody(err: Error): { error?: { code?: string; type?: string } } | undefined {
   const responseBody = (err as { responseBody?: string }).responseBody;
   if (typeof responseBody === "string") {
     try {
@@ -72,68 +62,60 @@ function getErrorBody(err: Error): { error?: { code?: number; details?: unknown[
   }
 
   const data = (err as { data?: { error?: unknown } }).data;
-  if (data?.error) return { error: data.error as { code?: number; details?: unknown[] } };
+  if (data?.error) return { error: data.error as { code?: string; type?: string } };
 
-  return undefined;
+  try {
+    return JSON.parse(err.message);
+  } catch {
+    return undefined;
+  }
 }
 
-function parseGoogleApiError(rawErr: unknown): ParsedGoogleError {
+function getRetryDelayMs(err: Error): number | undefined {
+  const headers = (err as { responseHeaders?: Record<string, string> }).responseHeaders;
+  const retryAfter = headers?.["retry-after"] ?? headers?.["Retry-After"];
+  if (!retryAfter) return undefined;
+  const seconds = Number.parseFloat(retryAfter);
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+}
+
+function parseApiError(rawErr: unknown): ParsedApiError {
   const err = unwrapError(rawErr);
-  if (!(err instanceof Error)) return { isDailyQuotaExhausted: false };
+  if (!(err instanceof Error)) return { isQuotaExhausted: false };
+
   const status = (err as { status?: number; statusCode?: number }).status ?? (err as { statusCode?: number }).statusCode;
-
   const parsed = getErrorBody(err);
-  if (!parsed) return { status, isDailyQuotaExhausted: false };
-
-  const details = parsed.error?.details;
-
-  const retryInfo = Array.isArray(details)
-    ? details.find(
-        (d): d is { retryDelay?: string } =>
-          typeof d === "object" && d !== null && String((d as { "@type"?: string })["@type"]).includes("RetryInfo")
-      )
-    : undefined;
-  const retryDelayStr = retryInfo?.retryDelay;
-  const retryDelayMs = retryDelayStr ? Math.round(Number.parseFloat(retryDelayStr) * 1000) : undefined;
-
-  const quotaFailure = Array.isArray(details)
-    ? details.find(
-        (d): d is { violations?: Array<{ quotaId?: string }> } =>
-          typeof d === "object" && d !== null && String((d as { "@type"?: string })["@type"]).includes("QuotaFailure")
-      )
-    : undefined;
-  const isDailyQuotaExhausted =
-    quotaFailure?.violations?.some((v) => typeof v.quotaId === "string" && v.quotaId.includes("PerDay")) ?? false;
+  const code = parsed?.error?.code;
 
   return {
-    status: status ?? parsed.error?.code,
-    retryDelayMs: Number.isFinite(retryDelayMs) ? retryDelayMs : undefined,
-    isDailyQuotaExhausted,
+    status,
+    retryDelayMs: getRetryDelayMs(err),
+    // OpenAI's "insufficient_quota" means the account/billing limit is hit —
+    // distinct from "rate_limit_exceeded", which clears on its own shortly.
+    isQuotaExhausted: code === "insufficient_quota",
   };
 }
 
-/** Used by lib/sync/sync-runner.ts to stop a whole run early once the daily cap is hit. */
+/** Used by lib/sync/sync-runner.ts to stop a whole run early once a billing/plan quota is hit. */
 export function isDailyQuotaExhaustedError(err: unknown): boolean {
-  return parseGoogleApiError(err).isDailyQuotaExhausted;
+  return parseApiError(err).isQuotaExhausted;
 }
 
 /**
  * True for any error worth rotating to a different API key over (see
- * lib/gemini/key-pool.ts) — quota/rate-limit responses (429) or an invalid/
- * revoked key (401/403, or a 400 with Google's "API key not valid" message).
- * Broader than `isDailyQuotaExhaustedError`: a per-minute 429 is also worth
- * an immediate key switch, not just a daily cap.
+ * lib/openai/key-pool.ts) — quota/rate-limit responses (429) or an invalid/
+ * revoked key (401/403, or a 400/401 with an "invalid api key" message).
  */
 export function isRotatableKeyError(rawErr: unknown): boolean {
   const err = unwrapError(rawErr);
   if (!(err instanceof Error)) return false;
   const status = (err as { status?: number; statusCode?: number }).status ?? (err as { statusCode?: number }).statusCode;
   if (status === 429 || status === 401 || status === 403) return true;
-  return /api key not valid|invalid api key/i.test(err.message);
+  return /invalid api key|incorrect api key/i.test(err.message);
 }
 
-function isRetryableError(err: unknown, status: number | undefined, isDailyQuotaExhausted: boolean): boolean {
-  if (isDailyQuotaExhausted) return false; // won't clear within any retry budget we'd wait for
+function isRetryableError(err: unknown, status: number | undefined, isQuotaExhausted: boolean): boolean {
+  if (isQuotaExhausted) return false; // won't clear within any retry budget we'd wait for
   if (status === 429 || status === 500 || status === 503) return true;
   const message = err instanceof Error ? err.message : String(err);
   return /timeout|ECONNRESET|fetch failed/i.test(message);
@@ -152,8 +134,8 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions): Pr
       return await fn();
     } catch (err) {
       lastErr = err;
-      const { status, retryDelayMs, isDailyQuotaExhausted } = parseGoogleApiError(err);
-      if (!isRetryableError(err, status, isDailyQuotaExhausted) || attempt === maxRetries) throw err;
+      const { status, retryDelayMs, isQuotaExhausted } = parseApiError(err);
+      if (!isRetryableError(err, status, isQuotaExhausted) || attempt === maxRetries) throw err;
 
       const jitterMs = Math.random() * 300;
       const calculatedBackoffMs = Math.min(baseDelayMs * 2 ** attempt, maxBackoffMs);

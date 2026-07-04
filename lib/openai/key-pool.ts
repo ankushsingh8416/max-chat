@@ -1,9 +1,9 @@
 /**
- * Rotates across multiple Gemini API keys so a quota/rate-limit or invalid-
+ * Rotates across multiple OpenAI API keys so a quota/rate-limit or invalid-
  * key error on one key doesn't stall the whole app — the next call (or, for
  * bulk embedding, the very same call) automatically moves to the next key.
  *
- * Configure via `GEMINI_API_KEYS` (comma-separated). `GEMINI_API_KEY` alone
+ * Configure via `OPENAI_API_KEYS` (comma-separated). `OPENAI_API_KEY` alone
  * still works as a single-key fallback and is folded into the pool if set.
  */
 
@@ -12,18 +12,18 @@ interface KeyEntry {
   exhaustedUntil: number | null;
 }
 
-const EXHAUSTION_COOLDOWN_MS = 24 * 60 * 60 * 1000; // matches Gemini's daily quota reset cadence
+const EXHAUSTION_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 let pool: KeyEntry[] | null = null;
 let cursor = 0;
 
 function parseKeys(): string[] {
-  const keys = (process.env.GEMINI_API_KEYS ?? "")
+  const keys = (process.env.OPENAI_API_KEYS ?? "")
     .split(",")
     .map((k) => k.trim())
     .filter(Boolean);
 
-  const single = process.env.GEMINI_API_KEY?.trim();
+  const single = process.env.OPENAI_API_KEY?.trim();
   if (single && !keys.includes(single)) keys.unshift(single);
 
   return keys;
@@ -33,7 +33,7 @@ function getPool(): KeyEntry[] {
   if (!pool) {
     const keys = parseKeys();
     if (keys.length === 0) {
-      throw new Error("No Gemini API key configured — set GEMINI_API_KEY or GEMINI_API_KEYS");
+      throw new Error("No OpenAI API key configured — set OPENAI_API_KEY or OPENAI_API_KEYS");
     }
     pool = keys.map((key) => ({ key, exhaustedUntil: null }));
   }
@@ -68,7 +68,7 @@ export function markKeyExhausted(key: string): void {
 
   entries[idx].exhaustedUntil = Date.now() + EXHAUSTION_COOLDOWN_MS;
   cursor = (idx + 1) % entries.length;
-  console.warn(`[gemini] Key ending ...${key.slice(-6)} marked exhausted — rotating to the next key.`);
+  console.warn(`[openai] Key ending ...${key.slice(-6)} marked exhausted — rotating to the next key.`);
 }
 
 export function keyCount(): number {

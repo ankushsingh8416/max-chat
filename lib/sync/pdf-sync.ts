@@ -2,11 +2,12 @@ import { discoverDownloadLinks } from "../wp/downloads";
 import { extractPdfText } from "../content/pdf";
 import { chunkContent } from "../content/chunk";
 import { embedTexts, getRetryCount, resetRetryCount } from "./embedding-service";
-import { getSupabaseAdmin } from "../supabase/client";
+import { deleteChunksBySourceUrl, insertContentChunks } from "../db/content-chunks";
+import { insertSyncLog } from "../db/sync-logs";
 import { isDailyQuotaExhaustedError } from "./retry";
 import { isAlreadyDone, loadCheckpoint, recordResult, saveCheckpoint, type CheckpointState } from "./checkpoint";
 import { formatDuration, logError, logInfo, logSuccess, logWarn, newLine, renderProgressBar } from "./logger";
-import type { ContentChunkRow } from "../supabase/types";
+import type { ContentChunkRow } from "../db/types";
 
 const PDF_POST_TYPE = "pdf";
 
@@ -44,7 +45,6 @@ async function syncSinglePdf(
     return { chunkCount: 0, skipped: true };
   }
 
-  const admin = getSupabaseAdmin();
   const { text } = await extractPdfText(url);
   const chunks = chunkContent(text);
 
@@ -62,8 +62,7 @@ async function syncSinglePdf(
 
   const embeddings = await embedTexts(chunks.map((c) => c.text));
 
-  const { error: deleteError } = await admin.from("content_chunks").delete().eq("source_url", url);
-  if (deleteError) throw new Error(`delete old chunks failed: ${deleteError.message}`);
+  await deleteChunksBySourceUrl(url);
 
   const rows: ContentChunkRow[] = chunks.map((chunk, i) => ({
     source_url: url,
@@ -76,8 +75,7 @@ async function syncSinglePdf(
     last_modified: lastModified,
   }));
 
-  const { error: insertError } = await admin.from("content_chunks").insert(rows);
-  if (insertError) throw new Error(`insert chunks failed: ${insertError.message}`);
+  await insertContentChunks(rows);
 
   recordResult(checkpoint, {
     sourceUrl: url,
@@ -100,7 +98,6 @@ async function syncSinglePdf(
  */
 export async function runPdfSync(opts: PdfSyncOptions = {}): Promise<PdfSyncReport> {
   const startedAt = Date.now();
-  const admin = getSupabaseAdmin();
   const errors: string[] = [];
   const failedPdfs: string[] = [];
   let pdfsSynced = 0;
@@ -159,13 +156,11 @@ export async function runPdfSync(opts: PdfSyncOptions = {}): Promise<PdfSyncRepo
   const retryCount = getRetryCount();
   const status: PdfSyncReport["status"] = errors.length === 0 ? "success" : pdfsSynced > 0 ? "partial" : "failed";
 
-  const { error: logInsertError } = await admin.from("sync_logs").insert({
-    status,
-    pages_synced: pdfsSynced,
-    chunks_created: chunksCreated,
-    errors,
-  });
-  if (logInsertError) logWarn(`Failed to write sync_logs entry: ${logInsertError.message}`);
+  try {
+    await insertSyncLog(status, pdfsSynced, chunksCreated, errors);
+  } catch (err) {
+    logWarn(`Failed to write sync_logs entry: ${(err as Error).message}`);
+  }
 
   const report: PdfSyncReport = {
     status,

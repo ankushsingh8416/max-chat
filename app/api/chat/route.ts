@@ -5,13 +5,13 @@ import {
   stepCountIs,
   type UIMessage,
 } from "ai";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { GEMINI_CHAT_MODEL, MAX_MESSAGE_LENGTH } from "@/lib/constants";
+import { createOpenAI } from "@ai-sdk/openai";
+import { OPENAI_CHAT_MODEL, MAX_MESSAGE_LENGTH } from "@/lib/constants";
 import { retrieveContext, buildSystemPrompt } from "@/lib/rag";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logChatAnalytics } from "@/lib/analytics";
 import { suggestContactFormTool } from "@/lib/tools";
-import { generateWithKeyFailover } from "@/lib/gemini/chat-failover";
+import { generateWithKeyFailover } from "@/lib/openai/chat-failover";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -77,12 +77,12 @@ export async function POST(req: Request) {
   const modelMessages = await convertToModelMessages(messages);
 
   // Fully generates server-side with automatic key rotation before anything
-  // reaches the client — see lib/gemini/chat-failover.ts for why chat
+  // reaches the client — see lib/openai/chat-failover.ts for why chat
   // generation can't rotate keys mid-stream the way embeddings can.
   const chunks = await generateWithKeyFailover((apiKey) => {
-    const google = createGoogleGenerativeAI({ apiKey });
+    const openai = createOpenAI({ apiKey });
     return {
-      model: google(GEMINI_CHAT_MODEL),
+      model: openai(OPENAI_CHAT_MODEL),
       system: systemPrompt,
       messages: modelMessages,
       tools: { suggestContactForm: suggestContactFormTool },
@@ -91,13 +91,10 @@ export async function POST(req: Request) {
       // model can see the tool result and follow up with a short message.
       stopWhen: stepCountIs(2),
       providerOptions: {
-        // Gemini 2.5 models "think" internally before deciding on tool calls
-        // (see the thoughtSignature in tool-call responses) — explicitly
-        // excluding thought content from the output stream, since when it
-        // does leak through it shows up as raw pseudo-code/reasoning text
-        // ("tool_code", "print(default_api...)", "thought ...") directly in
-        // the user-visible reply.
-        google: { thinkingConfig: { includeThoughts: false } },
+        // gpt-5.4-mini's reasoning-effort dial only accepts none/low/medium/
+        // high/xhigh (no "minimal"). "low" keeps latency down for
+        // straightforward RAG Q&A that doesn't need deep multi-step reasoning.
+        openai: { reasoningEffort: "low" },
       },
     };
   });

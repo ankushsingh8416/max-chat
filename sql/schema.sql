@@ -1,5 +1,7 @@
--- Max Estates chatbot — Supabase schema
--- Run this once in the Supabase SQL editor (or via `supabase db push`).
+-- Max Estates chatbot — Postgres schema
+-- Run this once against your Postgres instance (AWS RDS, or any other
+-- standard Postgres with the `vector` extension available), e.g.:
+--   psql "$DATABASE_URL" -f sql/schema.sql
 
 create extension if not exists vector;
 
@@ -92,25 +94,12 @@ as $$
 $$;
 
 -- ---------------------------------------------------------------------------
--- Row Level Security
+-- Access control
 -- ---------------------------------------------------------------------------
-alter table content_chunks enable row level security;
-alter table sync_logs enable row level security;
-alter table chat_analytics enable row level security;
-
--- Public (anon key) read-only access to content_chunks for client-side RPC calls.
-drop policy if exists "content_chunks_public_read" on content_chunks;
-create policy "content_chunks_public_read"
-  on content_chunks for select
-  to anon, authenticated
-  using (true);
-
--- All writes to content_chunks happen only via the service role key (sync
--- pipeline), which bypasses RLS entirely — no insert/update/delete policy is
--- granted to anon/authenticated, so client-side writes are impossible.
-
--- sync_logs and chat_analytics are written only by the server (service role)
--- and are not exposed to the client at all; no policies grant anon access.
-
-grant select on content_chunks to anon, authenticated;
-grant execute on function match_content_chunks(vector, float, int) to anon, authenticated;
+-- No Row Level Security / anon-vs-service-role split here (that was a
+-- Supabase-specific construct for exposing Postgres directly to browser
+-- clients). This app never connects to Postgres from the browser — every
+-- query goes through server-side Next.js code (API routes, the sync
+-- pipeline) using a single application DB user via DATABASE_URL — so access
+-- control lives at the application layer instead (e.g. the admin upload
+-- routes require a password-gated cookie; see lib/admin/auth.ts).

@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Please enter a valid email address." }, { status: 400 });
   }
 
-  // TODO: persist to a Supabase `leads` table and/or send an email/CRM
+  // TODO: persist to a `leads` table and/or send an email/CRM
   // notification once that's set up. For now this just logs server-side so
   // submissions are visible while the form is being tested.
   console.log("[contact] New lead:", {

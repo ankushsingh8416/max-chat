@@ -3,18 +3,20 @@ import { CHECKPOINT_FILE } from "../constants";
 
 /**
  * Local resume checkpoint keyed by page URL, so an interrupted `npm run
- * sync:full` (e.g. hitting the daily embedding quota partway through) can be
- * re-run and skip everything already embedded and saved, instead of starting
- * over from page one.
+ * sync:full` (e.g. hitting a rate limit partway through) can be re-run and
+ * skip everything already embedded and saved, instead of starting over from
+ * page one.
  *
- * IMPORTANT — this is a CLI-only optimization. On Vercel, `/api/sync` runs in
- * a fresh, mostly-read-only serverless filesystem on every invocation
- * (writes only succeed under /tmp, and even that doesn't persist between
- * invocations), so writes here silently no-op there rather than throwing —
- * the cron route just falls back to today's behavior of reprocessing
- * whatever the incremental `modified_after` cutoff selects. True cross-
- * invocation resumability for the serverless path would need the checkpoint
- * stored in Supabase instead of a local file.
+ * IMPORTANT — this only helps where the filesystem persists between runs. On
+ * Vercel, `/api/sync` runs in a fresh, mostly-read-only serverless filesystem
+ * on every invocation (writes only succeed under /tmp, and even that doesn't
+ * persist between invocations), so writes here silently no-op there rather
+ * than throwing — the cron route just falls back to reprocessing whatever the
+ * incremental `modified_after` cutoff selects. On a persistent server
+ * deployment (AWS EC2/ECS/Docker, see lib/scheduler.ts), this file lives on
+ * that server's own disk and works exactly like the local CLI case. True
+ * cross-invocation resumability for the serverless path would need the
+ * checkpoint stored in Postgres instead of a local file.
  */
 
 export type PageStatus = "done" | "failed";

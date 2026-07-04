@@ -22,17 +22,3 @@ export interface MatchedChunk {
   last_modified: string | null;
   similarity: number;
 }
-
-export interface SyncLogRow {
-  status: "success" | "partial" | "failed";
-  pages_synced: number;
-  chunks_created: number;
-  errors: string[];
-}
-
-export interface ChatAnalyticsRow {
-  question: string;
-  answer_found: boolean;
-  matched_chunk_count: number;
-  language_hint?: string;
-}

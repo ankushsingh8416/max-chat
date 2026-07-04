@@ -1,7 +1,20 @@
-import { embedText } from "./gemini/embeddings";
-import { getSupabaseAnon } from "./supabase/client";
-import { PROJECT_TYPE_SLUGS, RAG_MATCH_COUNT, RAG_MATCH_THRESHOLD, WP_BASE_URL } from "./constants";
-import type { MatchedChunk } from "./supabase/types";
+import { embedText } from "./openai/embeddings";
+import {
+  matchContentChunks,
+  selectAllProjectsChunkZero,
+  selectStructuredProjectChunksByTitle,
+  selectRecentChunks,
+  selectManualUploadChunksForContext,
+} from "./db/content-chunks";
+import {
+  PROJECT_TYPE_SLUGS,
+  RAG_MATCH_COUNT,
+  RAG_MATCH_THRESHOLD,
+  WP_BASE_URL,
+  MANUAL_UPLOAD_POST_TYPE,
+  MAX_MANUAL_UPLOAD_CONTEXT_CHUNKS,
+} from "./constants";
+import type { MatchedChunk } from "./db/types";
 
 const PROJECT_QUERY_KEYWORDS = [
   "price", "cost", "rera", "location", "possession", "amenities", "bhk",
@@ -86,17 +99,10 @@ export interface RetrievalResult {
  * rather than trusting vector similarity alone for precise factual answers.
  */
 export async function retrieveContext(query: string): Promise<RetrievalResult> {
-  const supabase = getSupabaseAnon();
   const embedding = await embedText(query);
+  const vectorMatches = await matchContentChunks(embedding, RAG_MATCH_THRESHOLD, RAG_MATCH_COUNT);
 
-  const { data: vectorMatches, error } = await supabase.rpc("match_content_chunks", {
-    query_embedding: embedding,
-    match_threshold: RAG_MATCH_THRESHOLD,
-    match_count: RAG_MATCH_COUNT,
-  });
-  if (error) throw new Error(`match_content_chunks RPC failed: ${error.message}`);
-
-  const chunks: MatchedChunk[] = [...((vectorMatches as MatchedChunk[]) ?? [])];
+  const chunks: MatchedChunk[] = [...vectorMatches];
   const seenIds = new Set(chunks.map((c) => c.id));
   let usedStructuredLookup = false;
 
@@ -107,71 +113,67 @@ export async function retrieveContext(query: string): Promise<RetrievalResult> {
     // surface one consolidated brochure chunk repeatedly instead of each
     // project's own page.
     usedStructuredLookup = true;
-    const { data: allProjects, error: allErr } = await supabase
-      .from("content_chunks")
-      .select("id, source_url, title, post_type, chunk_text, structured_data, last_modified")
-      .in("post_type", Array.from(PROJECT_TYPE_SLUGS))
-      .eq("chunk_index", 0)
-      .limit(50);
-
-    if (allErr) {
-      console.error(`[rag] all-projects lookup failed: ${allErr.message}`);
-    } else {
-      for (const match of (allProjects as MatchedChunk[]) ?? []) {
+    try {
+      const allProjects = await selectAllProjectsChunkZero(Array.from(PROJECT_TYPE_SLUGS));
+      for (const match of allProjects) {
         if (!seenIds.has(match.id)) {
           seenIds.add(match.id);
           chunks.push({ ...match, similarity: 1 });
         }
       }
+    } catch (err) {
+      console.error(`[rag] all-projects lookup failed: ${(err as Error).message}`);
     }
   } else if (looksLikeProjectQuery(query)) {
     usedStructuredLookup = true;
     const terms = extractCandidateTerms(query);
 
-    let structuredQuery = supabase
-      .from("content_chunks")
-      .select("id, source_url, title, post_type, chunk_text, structured_data, last_modified")
-      .in("post_type", Array.from(PROJECT_TYPE_SLUGS))
-      .not("structured_data", "is", null);
-
-    if (terms.length > 0) {
-      structuredQuery = structuredQuery.or(terms.map((t) => `title.ilike.%${t}%`).join(","));
-    }
-
-    const { data: structuredMatches, error: structErr } = await structuredQuery.limit(8);
-
-    if (structErr) {
-      console.error(`[rag] structured lookup failed: ${structErr.message}`);
-    } else {
-      for (const match of (structuredMatches as MatchedChunk[]) ?? []) {
+    try {
+      const structuredMatches = await selectStructuredProjectChunksByTitle(Array.from(PROJECT_TYPE_SLUGS), terms);
+      for (const match of structuredMatches) {
         if (!seenIds.has(match.id)) {
           seenIds.add(match.id);
           chunks.push({ ...match, similarity: 1 });
         }
       }
+    } catch (err) {
+      console.error(`[rag] structured lookup failed: ${(err as Error).message}`);
     }
   }
 
   if (looksLikeRecencyQuery(query)) {
     usedStructuredLookup = true;
-    const { data: recentMatches, error: recentErr } = await supabase
-      .from("content_chunks")
-      .select("id, source_url, title, post_type, chunk_text, structured_data, last_modified")
-      .in("post_type", ["post", "news_and_media"])
-      .eq("chunk_index", 0)
-      .order("last_modified", { ascending: false })
-      .limit(5);
-
-    if (recentErr) {
-      console.error(`[rag] recency lookup failed: ${recentErr.message}`);
-    } else {
-      for (const match of (recentMatches as MatchedChunk[]) ?? []) {
+    try {
+      const recentMatches = await selectRecentChunks(["post", "news_and_media"], 5);
+      for (const match of recentMatches) {
         if (!seenIds.has(match.id)) {
           seenIds.add(match.id);
           chunks.push({ ...match, similarity: 1 });
         }
       }
+    } catch (err) {
+      console.error(`[rag] recency lookup failed: ${(err as Error).message}`);
     }
+  }
+
+  // Admin-uploaded documents (see /admin, lib/uploads/process-upload.ts) are
+  // injected unconditionally, not gated on similarity — they're often short,
+  // deliberately-added "always follow this" instructions/facts that won't
+  // reliably score above RAG_MATCH_THRESHOLD against arbitrary phrasing of a
+  // related question, the same problem recency/all-projects queries have.
+  try {
+    const uploadedChunks = await selectManualUploadChunksForContext(
+      MANUAL_UPLOAD_POST_TYPE,
+      MAX_MANUAL_UPLOAD_CONTEXT_CHUNKS
+    );
+    for (const match of uploadedChunks) {
+      if (!seenIds.has(match.id)) {
+        seenIds.add(match.id);
+        chunks.push({ ...match, similarity: 1 });
+      }
+    }
+  } catch (err) {
+    console.error(`[rag] manual-upload lookup failed: ${(err as Error).message}`);
   }
 
   return { chunks, usedStructuredLookup };

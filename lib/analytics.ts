@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from "./supabase/client";
+import { insertChatAnalytics } from "./db/chat-analytics";
 
 const HINGLISH_WORDS = ["kya", "hai", "kitna", "kitne", "batao", "kaha", "kahan", "mujhe", "chahiye"];
 
@@ -15,16 +15,5 @@ function detectLanguageHint(question: string): string {
  * a logging failure must not affect the chat response.
  */
 export function logChatAnalytics(question: string, answerFound: boolean, matchedChunkCount: number): void {
-  const admin = getSupabaseAdmin();
-  admin
-    .from("chat_analytics")
-    .insert({
-      question,
-      answer_found: answerFound,
-      matched_chunk_count: matchedChunkCount,
-      language_hint: detectLanguageHint(question),
-    })
-    .then(({ error }) => {
-      if (error) console.error("[analytics] failed to log:", error.message);
-    });
+  insertChatAnalytics(question, answerFound, matchedChunkCount, detectLanguageHint(question));
 }

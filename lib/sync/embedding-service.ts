@@ -1,4 +1,4 @@
-import { embedBatchRaw } from "../gemini/embeddings";
+import { embedBatchRaw } from "../openai/embeddings";
 import {
   EMBEDDING_BATCH_SIZE,
   EMBEDDING_CONCURRENCY,
@@ -25,10 +25,10 @@ export function getRetryCount(): number {
 /**
  * Embeds many chunks for the bulk sync pipeline: batched into
  * EMBEDDING_BATCH_SIZE-sized requests (fewer, larger requests use less of
- * Gemini's daily request-count quota than many small ones), each call paced
- * by a shared RateLimiter and bounded by a ConcurrencyQueue (both
+ * OpenAI's per-minute request-count limit than many small ones), each call
+ * paced by a shared RateLimiter and bounded by a ConcurrencyQueue (both
  * configurable via env — see lib/constants.ts), with truncated exponential
- * backoff that honors Google's own `retryDelay` when a 429 includes one.
+ * backoff that honors OpenAI's own `Retry-After` header when a 429 includes one.
  */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   const results: number[][] = [];

@@ -3,7 +3,8 @@ import { cleanHtmlToText } from "../content/clean";
 import { fetchGenericPageText, resolveProjectStructuredData } from "../content/extract";
 import { chunkContent } from "../content/chunk";
 import { embedTexts, getRetryCount, resetRetryCount } from "./embedding-service";
-import { getSupabaseAdmin } from "../supabase/client";
+import { deleteChunksBySourceUrl, insertContentChunks } from "../db/content-chunks";
+import { getLastSuccessfulRunAt, insertSyncLog } from "../db/sync-logs";
 import { PROJECT_TYPE_SLUGS } from "../constants";
 import { isDailyQuotaExhaustedError } from "./retry";
 import {
@@ -15,7 +16,7 @@ import {
 } from "./checkpoint";
 import { formatDuration, logError, logInfo, logSuccess, logWarn, newLine, renderProgressBar } from "./logger";
 import type { WPContentItem, WPPostType } from "../wp/types";
-import type { ContentChunkRow } from "../supabase/types";
+import type { ContentChunkRow } from "../db/types";
 
 export interface SyncOptions {
   /** Force a complete re-fetch of every post type from WordPress, ignoring the incremental cutoff. */
@@ -37,17 +38,6 @@ export interface SyncReport {
   stoppedEarly: boolean;
 }
 
-async function getLastSuccessfulRunAt(): Promise<string | undefined> {
-  const admin = getSupabaseAdmin();
-  const { data } = await admin
-    .from("sync_logs")
-    .select("run_at")
-    .eq("status", "success")
-    .order("run_at", { ascending: false })
-    .limit(1);
-  return data?.[0]?.run_at;
-}
-
 interface ItemResult {
   chunkCount: number;
   skipped: boolean;
@@ -67,7 +57,6 @@ async function syncSingleItem(item: WPContentItem, postType: WPPostType, checkpo
     return { chunkCount: 0, skipped: true };
   }
 
-  const admin = getSupabaseAdmin();
   const title = cleanHtmlToText(item.title.rendered) || "(untitled)";
   let bodyText = cleanHtmlToText(item.content.rendered);
 
@@ -102,8 +91,7 @@ async function syncSingleItem(item: WPContentItem, postType: WPPostType, checkpo
 
   // Delete stale chunks for this page before inserting fresh ones, so a
   // shrinking page (fewer chunks than last time) never leaves orphans behind.
-  const { error: deleteError } = await admin.from("content_chunks").delete().eq("source_url", item.link);
-  if (deleteError) throw new Error(`delete old chunks failed: ${deleteError.message}`);
+  await deleteChunksBySourceUrl(item.link);
 
   const rows: ContentChunkRow[] = chunks.map((chunk, i) => ({
     source_url: item.link,
@@ -116,8 +104,7 @@ async function syncSingleItem(item: WPContentItem, postType: WPPostType, checkpo
     last_modified: item.modified_gmt,
   }));
 
-  const { error: insertError } = await admin.from("content_chunks").insert(rows);
-  if (insertError) throw new Error(`insert chunks failed: ${insertError.message}`);
+  await insertContentChunks(rows);
 
   recordResult(checkpoint, {
     sourceUrl: item.link,
@@ -134,7 +121,7 @@ async function syncSingleItem(item: WPContentItem, postType: WPPostType, checkpo
 /**
  * Runs the full content sync: discovers post types, fetches new/changed
  * content (or everything, with `full: true`), extracts + chunks + embeds it,
- * and upserts it into Supabase. Always does a full re-sync for project-type
+ * and upserts it into Postgres. Always does a full re-sync for project-type
  * content regardless of the incremental cutoff, since price/availability can
  * change without WP bumping `modified`.
  *
@@ -145,7 +132,6 @@ async function syncSingleItem(item: WPContentItem, postType: WPPostType, checkpo
  */
 export async function runContentSync(opts: SyncOptions = {}): Promise<SyncReport> {
   const startedAt = Date.now();
-  const admin = getSupabaseAdmin();
   const errors: string[] = [];
   const failedPages: string[] = [];
   let pagesSynced = 0;
@@ -234,13 +220,11 @@ export async function runContentSync(opts: SyncOptions = {}): Promise<SyncReport
   const retryCount = getRetryCount();
   const status: SyncReport["status"] = errors.length === 0 ? "success" : pagesSynced > 0 ? "partial" : "failed";
 
-  const { error: logInsertError } = await admin.from("sync_logs").insert({
-    status,
-    pages_synced: pagesSynced,
-    chunks_created: chunksCreated,
-    errors,
-  });
-  if (logInsertError) logWarn(`Failed to write sync_logs entry: ${logInsertError.message}`);
+  try {
+    await insertSyncLog(status, pagesSynced, chunksCreated, errors);
+  } catch (err) {
+    logWarn(`Failed to write sync_logs entry: ${(err as Error).message}`);
+  }
 
   const report: SyncReport = {
     status,

@@ -18,20 +18,17 @@ interface ChatGenerationParams {
 }
 
 /**
- * Runs streamText with automatic key rotation (lib/gemini/key-pool.ts) on a
- * quota/rate-limit/invalid-key error. Unlike the embedding path (lib/gemini/
- * embeddings.ts), chat generation can't safely rotate keys *mid-stream* —
- * once bytes have started flowing to the client, restarting on a new key
- * would mean either a broken stream or a duplicated response. So this fully
- * generates the reply server-side first, buffering it into an array of UI
- * message chunks, and only returns once a clean result is available (or
- * every key has been tried).
+ * Runs streamText with automatic key rotation (lib/openai/key-pool.ts) on a
+ * quota/rate-limit/invalid-key error. Chat generation can't safely rotate
+ * keys *mid-stream* — once bytes have started flowing to the client,
+ * restarting on a new key would mean either a broken stream or a duplicated
+ * response. So this fully generates the reply server-side first, buffering
+ * it into an array of UI message chunks, and only returns once a clean
+ * result is available (or every key has been tried).
  *
  * The trade-off: the client loses live token-by-token streaming in exchange
  * for the current request actually succeeding when the *first* key it tries
- * is out of quota, not just requests after it. Given how tight the free-tier
- * chat quota has proven (20 requests/day per key), that trade is worth it —
- * a fast, complete answer beats a live-typed answer that dies mid-sentence.
+ * is rate-limited, not just requests after it.
  */
 export async function generateWithKeyFailover(
   buildParams: (apiKey: string) => ChatGenerationParams
