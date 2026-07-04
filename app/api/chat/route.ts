@@ -1,12 +1,17 @@
-import { convertToModelMessages, stepCountIs, streamText, type UIMessage } from "ai";
+import {
+  convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  stepCountIs,
+  type UIMessage,
+} from "ai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { GEMINI_CHAT_MODEL, MAX_MESSAGE_LENGTH } from "@/lib/constants";
 import { retrieveContext, buildSystemPrompt } from "@/lib/rag";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logChatAnalytics } from "@/lib/analytics";
 import { suggestContactFormTool } from "@/lib/tools";
-import { getActiveKey, keyCount, markKeyExhausted } from "@/lib/gemini/key-pool";
-import { isRotatableKeyError } from "@/lib/sync/retry";
+import { generateWithKeyFailover } from "@/lib/gemini/chat-failover";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -69,38 +74,39 @@ export async function POST(req: Request) {
 
   logChatAnalytics(question, matchedChunkCount > 0, matchedChunkCount);
 
-  // Picked fresh per request (not module-level) so a key marked exhausted by
-  // a previous request's onError is skipped on the very next one — see
-  // lib/gemini/key-pool.ts. A mid-stream failure on *this* request still
-  // reaches the client as an error (streaming responses can't be silently
-  // retried once bytes are already flowing), but the key rotates out for
-  // every request after it.
-  const apiKey = getActiveKey();
-  const google = createGoogleGenerativeAI({ apiKey });
+  const modelMessages = await convertToModelMessages(messages);
 
-  const result = streamText({
-    model: google(GEMINI_CHAT_MODEL),
-    system: systemPrompt,
-    messages: await convertToModelMessages(messages),
-    tools: { suggestContactForm: suggestContactFormTool },
-    // Default stopWhen is 1 step, which would cut the response off right at
-    // the tool call with no accompanying text. Allow a second step so the
-    // model can see the tool result and follow up with a short message.
-    stopWhen: stepCountIs(2),
-    providerOptions: {
-      // Gemini 2.5 models "think" internally before deciding on tool calls
-      // (see the thoughtSignature in tool-call responses) — explicitly
-      // excluding thought content from the output stream, since when it
-      // does leak through it shows up as raw pseudo-code/reasoning text
-      // ("tool_code", "print(default_api...)", "thought ...") directly in
-      // the user-visible reply.
-      google: { thinkingConfig: { includeThoughts: false } },
-    },
-    onError: ({ error }) => {
-      if (isRotatableKeyError(error) && keyCount() > 1) markKeyExhausted(apiKey);
-      console.error("[api/chat] streamText error:", error);
+  // Fully generates server-side with automatic key rotation before anything
+  // reaches the client — see lib/gemini/chat-failover.ts for why chat
+  // generation can't rotate keys mid-stream the way embeddings can.
+  const chunks = await generateWithKeyFailover((apiKey) => {
+    const google = createGoogleGenerativeAI({ apiKey });
+    return {
+      model: google(GEMINI_CHAT_MODEL),
+      system: systemPrompt,
+      messages: modelMessages,
+      tools: { suggestContactForm: suggestContactFormTool },
+      // Default stopWhen is 1 step, which would cut the response off right at
+      // the tool call with no accompanying text. Allow a second step so the
+      // model can see the tool result and follow up with a short message.
+      stopWhen: stepCountIs(2),
+      providerOptions: {
+        // Gemini 2.5 models "think" internally before deciding on tool calls
+        // (see the thoughtSignature in tool-call responses) — explicitly
+        // excluding thought content from the output stream, since when it
+        // does leak through it shows up as raw pseudo-code/reasoning text
+        // ("tool_code", "print(default_api...)", "thought ...") directly in
+        // the user-visible reply.
+        google: { thinkingConfig: { includeThoughts: false } },
+      },
+    };
+  });
+
+  const stream = createUIMessageStream({
+    execute: async ({ writer }) => {
+      for (const chunk of chunks) writer.write(chunk);
     },
   });
 
-  return result.toUIMessageStreamResponse();
+  return createUIMessageStreamResponse({ stream });
 }

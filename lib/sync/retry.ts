@@ -31,6 +31,20 @@ interface ParsedGoogleError {
 }
 
 /**
+ * The `ai` package's `streamText`/`generateText` wrap repeated failures in a
+ * `RetryError` (`.reason: 'maxRetriesExceeded'`, `.lastError`, `.errors[]`)
+ * after exhausting their own internal same-key retries — that wrapper has no
+ * `.status`/`.statusCode` of its own, so status/quota checks below would
+ * silently see nothing and treat it as non-retryable/non-rotatable unless
+ * unwrapped down to the real underlying API error first.
+ */
+function unwrapError(err: unknown): unknown {
+  const lastError = (err as { lastError?: unknown } | null)?.lastError;
+  if (lastError instanceof Error && lastError !== err) return unwrapError(lastError);
+  return err;
+}
+
+/**
  * Two different SDKs in this codebase wrap the same underlying Gemini error
  * body differently:
  * - `@google/genai`'s `ApiError` (used for embeddings) sets `.status` to the
@@ -63,7 +77,8 @@ function getErrorBody(err: Error): { error?: { code?: number; details?: unknown[
   return undefined;
 }
 
-function parseGoogleApiError(err: unknown): ParsedGoogleError {
+function parseGoogleApiError(rawErr: unknown): ParsedGoogleError {
+  const err = unwrapError(rawErr);
   if (!(err instanceof Error)) return { isDailyQuotaExhausted: false };
   const status = (err as { status?: number; statusCode?: number }).status ?? (err as { statusCode?: number }).statusCode;
 
@@ -109,7 +124,8 @@ export function isDailyQuotaExhaustedError(err: unknown): boolean {
  * Broader than `isDailyQuotaExhaustedError`: a per-minute 429 is also worth
  * an immediate key switch, not just a daily cap.
  */
-export function isRotatableKeyError(err: unknown): boolean {
+export function isRotatableKeyError(rawErr: unknown): boolean {
+  const err = unwrapError(rawErr);
   if (!(err instanceof Error)) return false;
   const status = (err as { status?: number; statusCode?: number }).status ?? (err as { statusCode?: number }).statusCode;
   if (status === 429 || status === 401 || status === 403) return true;
