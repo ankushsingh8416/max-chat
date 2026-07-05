@@ -19,3 +19,28 @@ export async function insertSyncLog(
     [status, pagesSynced, chunksCreated, JSON.stringify(errors)]
   );
 }
+
+export interface SyncLogSummary {
+  runAt: string;
+  status: "success" | "partial" | "failed";
+  pagesSynced: number;
+  chunksCreated: number;
+  errorCount: number;
+}
+
+/** Most recent sync run of any status, for admin dashboard visibility (getLastSuccessfulRunAt only looks at successes). */
+export async function getLatestSyncLog(): Promise<SyncLogSummary | null> {
+  const { rows } = await getPool().query(
+    `select run_at, status, pages_synced, chunks_created, jsonb_array_length(errors) as error_count
+     from sync_logs order by run_at desc limit 1`
+  );
+  if (rows.length === 0) return null;
+  const row = rows[0];
+  return {
+    runAt: new Date(row.run_at).toISOString(),
+    status: row.status,
+    pagesSynced: row.pages_synced,
+    chunksCreated: row.chunks_created,
+    errorCount: row.error_count,
+  };
+}

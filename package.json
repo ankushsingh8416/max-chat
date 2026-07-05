@@ -10,7 +10,8 @@
     "sync": "tsx scripts/sync-content.ts",
     "sync:full": "tsx scripts/sync-content.ts --full",
     "sync:seed-checkpoint": "tsx scripts/seed-checkpoint-from-db.ts",
-    "sync:pdfs": "tsx scripts/sync-pdfs.ts"
+    "sync:pdfs": "tsx scripts/sync-pdfs.ts",
+    "db:reindex": "tsx scripts/reindex-db.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^4.0.7",

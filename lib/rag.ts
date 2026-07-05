@@ -5,16 +5,28 @@ import {
   selectStructuredProjectChunksByTitle,
   selectRecentChunks,
   selectManualUploadChunksForContext,
+  selectPostsNearDate,
 } from "./db/content-chunks";
+import { attemptLiveFallback } from "./rag/live-fallback";
 import {
   PROJECT_TYPE_SLUGS,
   RAG_MATCH_COUNT,
   RAG_MATCH_THRESHOLD,
+  LIVE_FALLBACK_CONFIDENCE_THRESHOLD,
   WP_BASE_URL,
   MANUAL_UPLOAD_POST_TYPE,
   MAX_MANUAL_UPLOAD_CONTEXT_CHUNKS,
 } from "./constants";
 import type { MatchedChunk } from "./db/types";
+
+// Below this word count, a query is almost certainly small talk ("hi",
+// "thanks") rather than an actual question — skip the live-fallback website
+// search for those rather than hitting WordPress on every greeting.
+const MIN_WORDS_FOR_LIVE_FALLBACK = 3;
+
+function maxSimilarity(chunks: MatchedChunk[]): number {
+  return chunks.reduce((max, c) => Math.max(max, c.similarity), 0);
+}
 
 const PROJECT_QUERY_KEYWORDS = [
   "price", "cost", "rera", "location", "possession", "amenities", "bhk",
@@ -56,6 +68,56 @@ export function looksLikeRecencyQuery(query: string): boolean {
   return RECENCY_KEYWORDS.some((k) => lower.includes(k));
 }
 
+const MONTH_NAMES = [
+  "january", "february", "march", "april", "may", "june", "july",
+  "august", "september", "october", "november", "december",
+];
+
+/**
+ * Parses "26 June" / "June 26th" / "26 Jun" style phrasing into a concrete
+ * date. Distinct from looksLikeRecencyQuery — "what's the latest blog" and
+ * "was anything published on 26 June" are different questions requiring
+ * different lookups: recency wants the top N sorted newest-first, a
+ * date-specific question wants whatever's closest to one exact day,
+ * including an honest "nothing that day, but here's June 24" when nothing
+ * matches exactly — confirmed directly that nothing was published on an
+ * example test date, so the right answer there is the nearest real posts
+ * with their real dates, not a blank refusal.
+ */
+export function parseDateFromQuery(query: string): Date | null {
+  const lower = query.toLowerCase();
+  const monthPattern = MONTH_NAMES.map((m) => `${m}|${m.slice(0, 3)}`).join("|");
+  const dayMonthRe = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${monthPattern})\\b`, "i");
+  const monthDayRe = new RegExp(`\\b(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "i");
+
+  let day: number | null = null;
+  let monthStr: string | null = null;
+
+  const m1 = lower.match(dayMonthRe);
+  if (m1) {
+    day = Number.parseInt(m1[1], 10);
+    monthStr = m1[2];
+  } else {
+    const m2 = lower.match(monthDayRe);
+    if (m2) {
+      monthStr = m2[1];
+      day = Number.parseInt(m2[2], 10);
+    }
+  }
+  if (day === null || !monthStr || day < 1 || day > 31) return null;
+
+  const monthIndex = MONTH_NAMES.findIndex((m) => m.startsWith(monthStr!.slice(0, 3)));
+  if (monthIndex === -1) return null;
+
+  const now = new Date();
+  let year = now.getFullYear();
+  const candidate = new Date(Date.UTC(year, monthIndex, day));
+  // A date more than ~2 months in the future almost certainly means last year, not next year.
+  if (candidate.getTime() - now.getTime() > 60 * 24 * 60 * 60 * 1000) year -= 1;
+
+  return new Date(Date.UTC(year, monthIndex, day));
+}
+
 const ALL_PROJECTS_KEYWORDS = [
   "all project", "all the project", "every project", "list of project",
   "list all project", "list your project", "how many project", "full list",
@@ -76,6 +138,27 @@ export function looksLikeAllProjectsQuery(query: string): boolean {
   return ALL_PROJECTS_KEYWORDS.some((k) => lower.includes(k));
 }
 
+const JOBS_KEYWORDS = [
+  "job", "jobs", "vacancy", "vacancies", "career", "careers", "hiring",
+  "opening", "openings", "position", "recruit", "apply",
+  // Hinglish
+  "naukri", "vacancy hai",
+];
+
+/**
+ * Detects "any jobs available" style queries. Confirmed directly: the site
+ * has real open positions indexed (post_type 'job'), but vague phrasing like
+ * "any job vacancy available" doesn't score well against specific job-title
+ * chunks ("Assistant Manager – Planning") — the same top-K similarity
+ * failure mode as all-projects/recency queries, fixed the same way, with a
+ * direct listing instead of trusting similarity search for a completeness
+ * question.
+ */
+export function looksLikeJobsQuery(query: string): boolean {
+  const lower = query.toLowerCase();
+  return JOBS_KEYWORDS.some((k) => lower.includes(k));
+}
+
 function extractCandidateTerms(query: string): string[] {
   return Array.from(
     new Set(
@@ -90,6 +173,7 @@ function extractCandidateTerms(query: string): string[] {
 export interface RetrievalResult {
   chunks: MatchedChunk[];
   usedStructuredLookup: boolean;
+  usedLiveFallback: boolean;
 }
 
 /**
@@ -156,6 +240,42 @@ export async function retrieveContext(query: string): Promise<RetrievalResult> {
     }
   }
 
+  const parsedDate = parseDateFromQuery(query);
+  if (parsedDate) {
+    usedStructuredLookup = true;
+    try {
+      const dateMatches = await selectPostsNearDate(
+        ["post", "news_and_media"],
+        parsedDate.toISOString(),
+        10,
+        5
+      );
+      for (const match of dateMatches) {
+        if (!seenIds.has(match.id)) {
+          seenIds.add(match.id);
+          chunks.push({ ...match, similarity: 1 });
+        }
+      }
+    } catch (err) {
+      console.error(`[rag] date-specific lookup failed: ${(err as Error).message}`);
+    }
+  }
+
+  if (looksLikeJobsQuery(query)) {
+    usedStructuredLookup = true;
+    try {
+      const jobMatches = await selectAllProjectsChunkZero(["job"]);
+      for (const match of jobMatches) {
+        if (!seenIds.has(match.id)) {
+          seenIds.add(match.id);
+          chunks.push({ ...match, similarity: 1 });
+        }
+      }
+    } catch (err) {
+      console.error(`[rag] jobs lookup failed: ${(err as Error).message}`);
+    }
+  }
+
   // Admin-uploaded documents (see /admin, lib/uploads/process-upload.ts) are
   // injected unconditionally, not gated on similarity — they're often short,
   // deliberately-added "always follow this" instructions/facts that won't
@@ -176,19 +296,47 @@ export async function retrieveContext(query: string): Promise<RetrievalResult> {
     console.error(`[rag] manual-upload lookup failed: ${(err as Error).message}`);
   }
 
-  return { chunks, usedStructuredLookup };
+  // Self-healing fallback: the index isn't confident it has the answer (see
+  // lib/rag/live-fallback.ts for exactly what "confident" means and why this
+  // can legitimately happen — a page missed at crawl time, or content that
+  // changed between scheduled syncs). Search the live site directly, index
+  // whatever's found on the spot, and use it for this response immediately.
+  let usedLiveFallback = false;
+  const isLowConfidence = maxSimilarity(chunks) < LIVE_FALLBACK_CONFIDENCE_THRESHOLD;
+  const looksLikeRealQuestion = query.trim().split(/\s+/).length >= MIN_WORDS_FOR_LIVE_FALLBACK;
+
+  if (isLowConfidence && looksLikeRealQuestion) {
+    try {
+      const liveChunks = await attemptLiveFallback(query);
+      for (const match of liveChunks) {
+        if (!seenIds.has(match.id)) {
+          seenIds.add(match.id);
+          chunks.push(match);
+          usedLiveFallback = true;
+        }
+      }
+    } catch (err) {
+      console.error(`[rag] live fallback failed: ${(err as Error).message}`);
+    }
+  }
+
+  return { chunks, usedStructuredLookup, usedLiveFallback };
 }
 
 /**
  * Baseline company facts, always available regardless of vector search luck
- * — sourced directly from maxestates.in's homepage and leadership-team page
- * (2026-07-03), not invented. The WordPress `pages` sync doesn't include a
- * dedicated "About Us" page (only Disclaimer/Careers/Leadership team/etc.),
- * so without this, "what is Max Estates" had nothing reliable to draw from
- * and the model would inconsistently either treat it as small talk or as an
- * unanswerable question depending on the run.
+ * — sourced directly from maxestates.in's homepage, leadership-team page, and
+ * news_and_media articles (2026-07-05), not invented. Needed for two reasons:
+ * (1) the WordPress `pages` sync doesn't include a dedicated "About Us" page
+ * (only Disclaimer/Careers/Leadership team/etc.), so without this, "what is
+ * Max Estates" had nothing reliable to draw from; (2) short factual queries
+ * like "who is the founder/chairman" score surprisingly low against the
+ * leadership-team page's long biographical chunk text in cosine similarity —
+ * confirmed directly (similarity ~0.40, not even in the top-5 nearest
+ * neighbors) — the same class of miss vector search has for recency/
+ * all-projects/manual-upload queries elsewhere in this file.
  */
-const COMPANY_PROFILE = `Max Estates is a real estate developer in Delhi-NCR, established in 2016, part of the Max Group (whose other businesses include Max Life Insurance and Antara senior living/senior care). It builds residential and commercial developments across Noida, Gurugram, Delhi, and Dehradun, guided by a "WorkWell" (commercial) and "LiveWell" (residential) philosophy centered on holistic well-being, and values of Sevabhav, Excellence, and Credibility. Source: ${WP_BASE_URL}`;
+const COMPANY_PROFILE = `Max Estates is a real estate developer in Delhi-NCR, established in 2016, part of the Max Group (whose other businesses include Max Life Insurance and Antara senior living/senior care). It builds residential and commercial developments across Noida, Gurugram, Delhi, and Dehradun, guided by a "WorkWell" (commercial) and "LiveWell" (residential) philosophy centered on holistic well-being, and values of Sevabhav, Excellence, and Credibility. Mr. Analjit Singh is the Founder & Chairman of The Max Group. Mr. Sahil Vachani is the Vice Chairman & Managing Director (MD) of Max Estates. Source: ${WP_BASE_URL}`;
 
 export function buildSystemPrompt(chunks: MatchedChunk[]): string {
   const contextBlock = chunks.length
@@ -217,6 +365,7 @@ Rules for specific questions (case 4 above):
 - If the context has nothing relevant at all, don't dwell on the gap or apologize for it — briefly and warmly pivot straight to calling \`suggestContactForm\` (e.g. "I'll get our team to share the latest details on that — could I get a few details from you?"). Never fabricate or guess a RERA number, price, or possession date to fill the gap.
 - If asked something like "commercial projects in Gurugram" and the context shows Max Estates' Gurugram projects are all residential, say so plainly (e.g. "Max Estates' Gurugram projects are residential; our commercial developments are in Noida and Delhi") rather than triggering the contact form — that's an answer, not a gap.
 - For "latest/most recent" questions, the context blog/news entries are already sorted newest-first by their "Last updated" date — the first one listed is the most recent. Use that date when citing it (e.g. "published on ...").
+- For "was anything published on [specific date]" questions, check each entry's actual "Last updated" date in the context before answering. If one genuinely matches, cite it. If none match that exact date, say so plainly rather than presenting a nearby date as if it were a match (e.g. "I don't see anything published on 26 June specifically, but [Title](URL) came out on 24 June" — never imply a different date is the one asked about).
 
 General style:
 - Keep a warm, professional, helpful tone — like a knowledgeable real estate advisor, not a generic bot.

@@ -171,6 +171,33 @@ export async function resolveProjectStructuredData(item: WPContentItem): Promise
   return extractStructuredDataFromHtml(html, item.link);
 }
 
+/** Keys worth pulling out of JSON-LD structured data — org/person/article facts that often never appear as visible page text at all. */
+const JSONLD_INTERESTING_KEYS = [
+  "name", "jobTitle", "description", "headline", "author", "datePublished",
+  "dateModified", "address", "telephone", "email", "url",
+];
+
+function flattenJsonLd(data: unknown, depth = 0): string {
+  if (depth > 3) return "";
+  if (Array.isArray(data)) {
+    return data.map((d) => flattenJsonLd(d, depth + 1)).filter(Boolean).join("; ");
+  }
+  if (typeof data === "string") return data;
+  if (data && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    if (obj["@graph"]) return flattenJsonLd(obj["@graph"], depth + 1);
+    const parts: string[] = [];
+    for (const key of JSONLD_INTERESTING_KEYS) {
+      const v = obj[key];
+      if (v === undefined || v === null) continue;
+      const nested = typeof v === "string" ? v : flattenJsonLd(v, depth + 1);
+      if (nested) parts.push(`${key}: ${nested}`);
+    }
+    return parts.join(", ");
+  }
+  return "";
+}
+
 /**
  * Generic visible-text scrape for any rendered page, used as a fallback for
  * ANY post type (not just projects) when `content.rendered` from the REST
@@ -180,19 +207,57 @@ export async function resolveProjectStructuredData(item: WPContentItem): Promise
  * editor field never captures, so without this fallback those pages sync
  * with zero chunks despite being real, substantial pages on the live site.
  *
- * Deliberately simpler than extractStructuredDataFromHtml (no field
- * extraction) — just collects deduplicated heading/paragraph/list text,
- * since page-builder sections often repeat the same CTA text in multiple
- * places.
+ * Includes `div`/`span`/`a` alongside headings/paragraphs/list items —
+ * confirmed directly that page-builder "card" layouts (e.g. the
+ * leadership-team page's team-member grid) render text like a person's name
+ * as bare `<div class="name">Sanjeev Ailawadi</div>`, with no heading or `<p>`
+ * wrapper at all, which the original heading/paragraph/list-only selector
+ * silently missed entirely. Safe to include structural tags like `div`
+ * because `.clone().children().remove().end().text()` only keeps an
+ * element's OWN direct text — a wrapping `<div>` around other elements has no
+ * direct text of its own once its children are stripped, so it contributes
+ * nothing and is filtered out by the length check below; only genuine
+ * text-bearing leaf nodes survive.
+ *
+ * Also pulls in content a plain visible-text scrape would otherwise miss
+ * entirely: table rows (kept as `cell | cell` so structure survives, rather
+ * than losing row alignment by scraping cells individually), OpenGraph/meta
+ * description, breadcrumb trails (extracted by class name before the general
+ * `nav` removal below, so real navigation menus still get stripped without
+ * also losing breadcrumb context), JSON-LD structured data, and image alt
+ * text (which occasionally carries real info, like a person's name, with no
+ * visible caption alongside it).
  */
 export function extractGenericPageText(html: string): string {
   const $ = cheerio.load(html);
-  $("script, style, nav, footer, noscript, header, form").remove();
+
+  const metaLines: string[] = [];
+  const ogTitle = $('meta[property="og:title"]').attr("content");
+  const ogDescription =
+    $('meta[property="og:description"]').attr("content") || $('meta[name="description"]').attr("content");
+  if (ogTitle) metaLines.push(`Page title: ${ogTitle}`);
+  if (ogDescription) metaLines.push(`Page description: ${ogDescription}`);
+
+  const breadcrumbText = $('[class*="breadcrumb"]').first().text().trim().replace(/\s+/g, " ");
+  if (breadcrumbText && breadcrumbText.length < 300) metaLines.push(`Breadcrumb: ${breadcrumbText}`);
+
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const flat = flattenJsonLd(JSON.parse($(el).text()));
+      if (flat) metaLines.push(`Structured data: ${flat}`);
+    } catch {
+      // Malformed JSON-LD shouldn't fail the whole page's extraction.
+    }
+  });
+
+  $("script, style, nav, footer, noscript, header, form, svg").remove();
 
   const seen = new Set<string>();
-  const lines: string[] = [];
+  const lines: string[] = [...metaLines];
+  metaLines.forEach((line) => seen.add(line.toLowerCase()));
+
   $("body")
-    .find("h1, h2, h3, h4, h5, h6, p, li")
+    .find("h1, h2, h3, h4, h5, h6, p, li, div, span, a, summary")
     .each((_, el) => {
       const text = $(el).clone().children().remove().end().text().trim().replace(/\s+/g, " ");
       if (!text || text.length < 3) return;
@@ -201,6 +266,33 @@ export function extractGenericPageText(html: string): string {
       seen.add(key);
       lines.push(text);
     });
+
+  $("table").each((_, table) => {
+    $(table)
+      .find("tr")
+      .each((_, tr) => {
+        const cells = $(tr)
+          .find("td, th")
+          .map((_, cell) => $(cell).text().trim().replace(/\s+/g, " "))
+          .get()
+          .filter(Boolean);
+        if (cells.length === 0) return;
+        const rowText = cells.join(" | ");
+        const key = rowText.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        lines.push(rowText);
+      });
+  });
+
+  $("img[alt]").each((_, img) => {
+    const alt = $(img).attr("alt")?.trim();
+    if (!alt || alt.length < 4) return;
+    const key = alt.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    lines.push(alt);
+  });
 
   return lines.join("\n");
 }

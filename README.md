@@ -179,6 +179,15 @@ without losing work:
 - **Per-page failure isolation**: one page's embedding failure never aborts the run — it's
   logged, checkpointed as `failed` (so it's retried on the next run, unlike successfully-done
   pages), and the crawl continues to the next page.
+- **Vector index rebuild after a full re-embed**: `content_chunks`'s similarity search uses an
+  IVFFlat index, which clusters vectors based on whatever data existed when it was built. If every
+  embedding is later replaced by a `--reset-checkpoint` run (e.g. switching embedding models —
+  Gemini → OpenAI did exactly this), that old clustering no longer matches the new vectors'
+  geometry, and searches can silently return few or no results for large parts of the query space
+  — **not an error, just quietly wrong answers**, which is exactly as bad as it sounds. A
+  `--reset-checkpoint` run therefore automatically rebuilds the index afterward
+  (`lib/db/maintenance.ts`); if you ever need to do it by hand (e.g. after restoring/migrating data
+  outside the sync CLI), run `npm run db:reindex`.
 
 **This checkpoint only helps where the filesystem persists between runs.** On Vercel, `/api/sync`
 runs in a fresh, largely read-only serverless filesystem on every invocation, so there's nothing
@@ -389,6 +398,7 @@ lib/
     sync-logs.ts                 sync_logs read/write
     chat-analytics.ts             chat_analytics insert
     types.ts                      shared row types
+    maintenance.ts                 rebuilds the vector index (see "Vector index rebuild..." above)
   admin/auth.ts             password-cookie check, shared by /admin and /api/admin/*
   uploads/process-upload.ts  admin-upload pipeline: extract → chunk → embed → save
   scheduler.ts              in-process daily auto-sync (AWS/persistent-server deployments only)
@@ -399,6 +409,7 @@ scripts/
   sync-content.ts             CLI entry point (`npm run sync` / `npm run sync:full`)
   sync-pdfs.ts                 CLI entry point (`npm run sync:pdfs`)
   seed-checkpoint-from-db.ts   one-time backfill if checkpoint and DB ever drift apart
+  reindex-db.ts                 manual `npm run db:reindex` — normally runs automatically instead
 sql/schema.sql               Postgres schema, match_content_chunks function
 instrumentation.ts            starts the auto-sync scheduler once per server instance
 public/embed.js               WordPress embed snippet

@@ -53,6 +53,7 @@ export async function insertContentChunks(rows: ContentChunkRow[]): Promise<void
     "structured_data",
     "embedding",
     "last_modified",
+    "content_hash",
   ];
   const values: unknown[] = [];
   const rowPlaceholders = rows.map((row, i) => {
@@ -65,13 +66,23 @@ export async function insertContentChunks(rows: ContentChunkRow[]): Promise<void
       row.chunk_index,
       row.structured_data ? JSON.stringify(row.structured_data) : null,
       toVectorLiteral(row.embedding),
-      row.last_modified
+      row.last_modified,
+      row.content_hash ?? null
     );
-    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::jsonb, $${base + 7}::vector, $${base + 8})`;
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}::jsonb, $${base + 7}::vector, $${base + 8}, $${base + 9})`;
   });
 
   const sql = `insert into content_chunks (${columns.join(", ")}) values ${rowPlaceholders.join(", ")}`;
   await getPool().query(sql, values);
+}
+
+/** The stored content_hash for a page's chunks (all rows share the same value), or null if not synced/tracked yet. */
+export async function getContentHash(sourceUrl: string): Promise<string | null> {
+  const { rows } = await getPool().query(
+    `select content_hash from content_chunks where source_url = $1 and content_hash is not null limit 1`,
+    [sourceUrl]
+  );
+  return rows[0]?.content_hash ?? null;
 }
 
 /** Cosine-similarity search via the match_content_chunks() SQL function (see sql/schema.sql). */
@@ -138,6 +149,33 @@ export async function selectRecentChunks(postTypes: string[], limit: number): Pr
   return rows.map(mapRow);
 }
 
+/**
+ * chunk_index=0 rows within `windowDays` of a specific date, closest first —
+ * used for "was anything published on 26 June" style date-specific queries,
+ * distinct from selectRecentChunks' "give me the newest N" (see
+ * lib/rag.ts's parseDateFromQuery for why these need different lookups).
+ * Returning the closest matches even when nothing lands exactly on the
+ * target date lets the model answer honestly ("nothing on the 26th, but
+ * here's the 24th") instead of a blank "not found."
+ */
+export async function selectPostsNearDate(
+  postTypes: string[],
+  targetDate: string,
+  windowDays: number,
+  limit: number
+): Promise<MatchedChunk[]> {
+  const { rows } = await getPool().query(
+    `select ${CHUNK_SELECT_COLUMNS} from content_chunks
+     where post_type = any($1) and chunk_index = 0
+       and last_modified between $2::timestamptz - ($3 || ' days')::interval
+                            and $2::timestamptz + ($3 || ' days')::interval
+     order by abs(extract(epoch from (last_modified - $2::timestamptz)))
+     limit $4`,
+    [postTypes, targetDate, windowDays, limit]
+  );
+  return rows.map(mapRow);
+}
+
 /** Every synced page's identity/freshness info, used to backfill the local sync checkpoint. */
 export async function selectAllSourceInfo(): Promise<
   { source_url: string; post_type: string; last_modified: string | null }[]
@@ -186,4 +224,56 @@ export async function deleteManualUpload(sourceUrl: string, postType: string): P
     sourceUrl,
     postType,
   ]);
+}
+
+export interface ContentStats {
+  totalPages: number;
+  totalChunks: number;
+  byPostType: { postType: string; pages: number; chunks: number }[];
+}
+
+/** Indexed-content overview for the admin dashboard. */
+export async function getContentStats(): Promise<ContentStats> {
+  const { rows } = await getPool().query(
+    `select post_type, count(distinct source_url) as pages, count(*) as chunks
+     from content_chunks group by post_type order by chunks desc`
+  );
+  const byPostType = rows.map((r: { post_type: string; pages: string; chunks: string }) => ({
+    postType: r.post_type,
+    pages: Number(r.pages),
+    chunks: Number(r.chunks),
+  }));
+  return {
+    totalPages: byPostType.reduce((sum, r) => sum + r.pages, 0),
+    totalChunks: byPostType.reduce((sum, r) => sum + r.chunks, 0),
+    byPostType,
+  };
+}
+
+export interface IndexedPageSummary {
+  sourceUrl: string;
+  title: string;
+  postType: string;
+  chunkCount: number;
+  lastModified: string | null;
+}
+
+/** Simple ILIKE search over title/chunk text, for the admin "search indexed content" tool. */
+export async function searchIndexedContent(query: string, limit: number): Promise<IndexedPageSummary[]> {
+  const { rows } = await getPool().query(
+    `select source_url, title, post_type, count(*) as chunk_count, max(last_modified) as last_modified
+     from content_chunks
+     where title ilike $1 or chunk_text ilike $1
+     group by source_url, title, post_type
+     order by max(created_at) desc
+     limit $2`,
+    [`%${query}%`, limit]
+  );
+  return rows.map((r: { source_url: string; title: string; post_type: string; chunk_count: string; last_modified: string | Date | null }) => ({
+    sourceUrl: r.source_url,
+    title: r.title,
+    postType: r.post_type,
+    chunkCount: Number(r.chunk_count),
+    lastModified: r.last_modified ? new Date(r.last_modified).toISOString() : null,
+  }));
 }

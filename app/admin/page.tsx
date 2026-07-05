@@ -1,6 +1,7 @@
 import { isAdminAuthorizedServer } from "@/lib/admin/auth";
 import { AdminLoginForm } from "@/components/admin/AdminLoginForm";
 import { UploadDashboard } from "@/components/admin/UploadDashboard";
+import { SyncDashboard } from "@/components/admin/SyncDashboard";
 
 export const dynamic = "force-dynamic";
 
@@ -14,7 +15,14 @@ export default async function AdminPage() {
         <p className="mb-6 text-sm text-me-neutral-800">
           Upload documents (PDF, Word, or plain text) to add them to the chatbot&apos;s knowledge base.
         </p>
-        {authorized ? <UploadDashboard /> : <AdminLoginForm />}
+        {authorized ? (
+          <div className="flex flex-col gap-6">
+            <SyncDashboard />
+            <UploadDashboard />
+          </div>
+        ) : (
+          <AdminLoginForm />
+        )}
       </div>
     </main>
   );

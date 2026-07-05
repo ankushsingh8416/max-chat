@@ -18,8 +18,19 @@ create table if not exists content_chunks (
   structured_data jsonb,
   embedding     vector(768) not null,
   last_modified timestamptz,
-  created_at    timestamptz not null default now()
+  created_at    timestamptz not null default now(),
+  -- SHA-256 of the page's extracted text, repeated on every chunk row for
+  -- that source_url. Lets the sync pipeline skip re-embedding a page whose
+  -- content is byte-for-byte unchanged even when it's re-checked (e.g.
+  -- project pages, always re-checked regardless of WP's `modified` field —
+  -- see lib/sync/sync-runner.ts) — saves embedding cost, and separately
+  -- catches page-builder edits that don't bump `modified` at all.
+  content_hash  text
 );
+
+-- Nullable, metadata-only add for anyone running this file against a
+-- database created before content_hash existed.
+alter table content_chunks add column if not exists content_hash text;
 
 -- Fast "delete all chunks for this page before re-inserting" during sync.
 create index if not exists content_chunks_source_url_idx on content_chunks (source_url);

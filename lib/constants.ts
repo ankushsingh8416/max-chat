@@ -43,10 +43,14 @@ export const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 // existing vector(768) column (sql/schema.sql) — no schema migration needed
 // even though the embedding provider changed. NOTE: switching embedding
 // models means every previously-synced chunk's vector is now from a
-// different embedding space
-// and must be regenerated — run `npm run sync:full -- --reset-checkpoint`
-// (and the PDF equivalent) after this migration, or search results will
-// silently compare incompatible vectors.
+// different embedding space and must be regenerated — run
+// `npm run sync:full -- --reset-checkpoint` (and the PDF equivalent) after
+// this migration, or search results will silently compare incompatible
+// vectors. That reset-checkpoint run also automatically rebuilds the vector
+// index afterward (lib/db/maintenance.ts) — confirmed the hard way that
+// skipping this leaves the IVFFlat index's clustering trained on the old
+// embedding space, which silently drops results for large parts of the
+// query space rather than erroring.
 export const EMBEDDING_DIMENSIONS = 768;
 
 export const CHUNK_TARGET_TOKENS = 650; // within the requested ~500-800 range
@@ -87,6 +91,10 @@ function intFromEnv(name: string, fallback: number): number {
 
 export const RAG_MATCH_COUNT = 8;
 export const RAG_MATCH_THRESHOLD = 0.55;
+// Stricter than RAG_MATCH_THRESHOLD: below this, retrieveContext treats the
+// vector search result as "not confident enough" and tries the live
+// WordPress-search fallback (lib/rag/live-fallback.ts) before giving up.
+export const LIVE_FALLBACK_CONFIDENCE_THRESHOLD = 0.65;
 
 export const CHAT_RATE_LIMIT_MAX = 15;
 export const CHAT_RATE_LIMIT_WINDOW_MS = 60_000;

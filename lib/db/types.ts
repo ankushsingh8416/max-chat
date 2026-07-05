@@ -10,6 +10,8 @@ export interface ContentChunkRow {
   structured_data: ProjectStructuredData | null;
   embedding: number[];
   last_modified: string | null;
+  /** SHA-256 of the page's full extracted text — see sql/schema.sql. Omit where change detection isn't relevant (uploads, live fallback). */
+  content_hash?: string | null;
 }
 
 export interface MatchedChunk {

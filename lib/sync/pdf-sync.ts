@@ -1,9 +1,17 @@
+import { createHash } from "crypto";
 import { discoverDownloadLinks } from "../wp/downloads";
 import { extractPdfText } from "../content/pdf";
-import { chunkContent } from "../content/chunk";
+import { chunkContent, type TextChunk } from "../content/chunk";
 import { embedTexts, getRetryCount, resetRetryCount } from "./embedding-service";
-import { deleteChunksBySourceUrl, insertContentChunks } from "../db/content-chunks";
+import { deleteChunksBySourceUrl, getContentHash, insertContentChunks } from "../db/content-chunks";
 import { insertSyncLog } from "../db/sync-logs";
+
+function hashChunks(chunks: TextChunk[]): string {
+  return createHash("sha256")
+    .update(chunks.map((c) => c.text).join(" "))
+    .digest("hex");
+}
+import { reindexEmbeddingIndex } from "../db/maintenance";
 import { isDailyQuotaExhaustedError } from "./retry";
 import { isAlreadyDone, loadCheckpoint, recordResult, saveCheckpoint, type CheckpointState } from "./checkpoint";
 import { formatDuration, logError, logInfo, logSuccess, logWarn, newLine, renderProgressBar } from "./logger";
@@ -60,6 +68,20 @@ async function syncSinglePdf(
     return { chunkCount: 0, skipped: false };
   }
 
+  const newHash = hashChunks(chunks);
+  const existingHash = await getContentHash(url);
+  if (existingHash && existingHash === newHash) {
+    recordResult(checkpoint, {
+      sourceUrl: url,
+      postType: PDF_POST_TYPE,
+      modified: lastModified,
+      chunkCount: chunks.length,
+      status: "done",
+      timestamp: new Date().toISOString(),
+    });
+    return { chunkCount: 0, skipped: true };
+  }
+
   const embeddings = await embedTexts(chunks.map((c) => c.text));
 
   await deleteChunksBySourceUrl(url);
@@ -73,6 +95,7 @@ async function syncSinglePdf(
     structured_data: null,
     embedding: embeddings[i],
     last_modified: lastModified,
+    content_hash: newHash,
   }));
 
   await insertContentChunks(rows);
@@ -160,6 +183,19 @@ export async function runPdfSync(opts: PdfSyncOptions = {}): Promise<PdfSyncRepo
     await insertSyncLog(status, pdfsSynced, chunksCreated, errors);
   } catch (err) {
     logWarn(`Failed to write sync_logs entry: ${(err as Error).message}`);
+  }
+
+  // See lib/sync/sync-runner.ts's identical step for why: a full re-embed
+  // can leave the IVFFlat vector index's clustering stale against the new
+  // data, silently dropping results until it's rebuilt.
+  if (opts.resetCheckpoint && pdfsSynced > 0) {
+    logInfo("Rebuilding the vector index after a full re-embed...");
+    try {
+      await reindexEmbeddingIndex();
+      logSuccess("Vector index rebuilt.");
+    } catch (err) {
+      logWarn(`Failed to rebuild vector index: ${(err as Error).message} — run 'npm run db:reindex' manually.`);
+    }
   }
 
   const report: PdfSyncReport = {
