@@ -1,8 +1,9 @@
 import { WP_BASE_URL } from "../constants";
-import { fetchGenericPageText } from "../content/extract";
+import { extractGenericPageText, extractPageDate } from "../content/extract";
+import { fetchRenderedHtml } from "../wp/client";
 import { chunkContent } from "../content/chunk";
 import { embedBatchRaw } from "../openai/embeddings";
-import { deleteChunksBySourceUrl, insertContentChunks } from "../db/content-chunks";
+import { deleteChunksBySourceUrl, getStoredLastModified, insertContentChunks } from "../db/content-chunks";
 import type { ContentChunkRow, MatchedChunk } from "../db/types";
 
 const LIVE_FALLBACK_TIMEOUT_MS = 12_000;
@@ -127,14 +128,25 @@ function containsAllTerms(text: string, terms: string[]): boolean {
  * *less* confident with more (irrelevant) context, not more.
  */
 async function fetchAndIndexPage(result: WpSearchResult, terms: string[]): Promise<MatchedChunk[]> {
-  const text = await fetchGenericPageText(result.url);
+  const html = await fetchRenderedHtml(result.url);
+  const text = extractGenericPageText(html);
   if (text.length < MIN_EXTRACTED_TEXT_LENGTH) return [];
 
   const chunks = chunkContent(text);
   if (chunks.length === 0) return [];
 
   const embeddings = await embedBatchRaw(chunks.map((c) => c.text));
-  const lastModified = new Date().toISOString();
+
+  // Prefer the page's own article:modified_time/published_time meta tags
+  // (real WordPress data) over "now" — confirmed directly that stamping a
+  // re-scraped page with the current timestamp corrupts its real publish
+  // date the moment it's ever re-indexed this way, breaking "when was this
+  // published" for that page from then on even though the original
+  // REST-based sync had it right. Falls back to whatever was already stored
+  // (if this page has been synced before) rather than guessing, and only
+  // uses "now" as a last resort for a page with no date info anywhere.
+  const lastModified =
+    extractPageDate(html) ?? (await getStoredLastModified(result.url)) ?? new Date().toISOString();
 
   const rows: ContentChunkRow[] = chunks.map((chunk, i) => ({
     source_url: result.url,

@@ -228,6 +228,28 @@ function flattenJsonLd(data: unknown, depth = 0): string {
  * text (which occasionally carries real info, like a person's name, with no
  * visible caption alongside it).
  */
+/**
+ * Reads the real publish/modified date directly out of the page's own
+ * meta tags (`article:modified_time` / `article:published_time` — the
+ * standard Open Graph / Yoast SEO tags WordPress emits on every post).
+ * Needed anywhere content gets indexed from a raw HTML scrape rather than
+ * the WP REST API's `modified_gmt` field (lib/rag/live-fallback.ts,
+ * lib/admin/sync-page.ts) — confirmed directly that stamping those rows with
+ * "now" instead corrupts a page's real publish date the moment it's ever
+ * re-scraped, breaking "when was this published" questions the *next* time
+ * they're asked, even though the first answer (from the REST-based sync) was
+ * correct.
+ */
+export function extractPageDate(html: string): string | null {
+  const $ = cheerio.load(html);
+  const modified = $('meta[property="article:modified_time"]').attr("content");
+  const published = $('meta[property="article:published_time"]').attr("content");
+  const raw = modified || published;
+  if (!raw) return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
 export function extractGenericPageText(html: string): string {
   const $ = cheerio.load(html);
 

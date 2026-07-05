@@ -1,10 +1,15 @@
 import { createHash } from "crypto";
 import * as cheerio from "cheerio";
 import { fetchRenderedHtml } from "../wp/client";
-import { extractGenericPageText } from "../content/extract";
+import { extractGenericPageText, extractPageDate } from "../content/extract";
 import { chunkContent } from "../content/chunk";
 import { embedBatchRaw } from "../openai/embeddings";
-import { deleteChunksBySourceUrl, getContentHash, insertContentChunks } from "../db/content-chunks";
+import {
+  deleteChunksBySourceUrl,
+  getContentHash,
+  getStoredLastModified,
+  insertContentChunks,
+} from "../db/content-chunks";
 import { WP_BASE_URL } from "../constants";
 import type { ContentChunkRow } from "../db/types";
 
@@ -76,7 +81,10 @@ export async function syncSinglePage(url: string): Promise<SyncPageResult> {
 
   if (changed) {
     const embeddings = await embedBatchRaw(chunks.map((c) => c.text));
-    const lastModified = new Date().toISOString();
+    // Prefer the page's own article:modified_time/published_time meta tags
+    // over "now" — see extractPageDate for why stamping a re-scrape with the
+    // current timestamp corrupts a page's real publish date going forward.
+    const lastModified = extractPageDate(html) ?? (await getStoredLastModified(trimmed)) ?? new Date().toISOString();
 
     const rows: ContentChunkRow[] = chunks.map((chunk, i) => ({
       source_url: trimmed,

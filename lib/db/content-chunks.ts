@@ -85,6 +85,15 @@ export async function getContentHash(sourceUrl: string): Promise<string | null> 
   return rows[0]?.content_hash ?? null;
 }
 
+/** The currently-stored last_modified for a page, if it's been synced before — see extractPageDate's callers for why this matters. */
+export async function getStoredLastModified(sourceUrl: string): Promise<string | null> {
+  const { rows } = await getPool().query(
+    `select last_modified from content_chunks where source_url = $1 and last_modified is not null limit 1`,
+    [sourceUrl]
+  );
+  return rows[0]?.last_modified ? new Date(rows[0].last_modified).toISOString() : null;
+}
+
 /** Cosine-similarity search via the match_content_chunks() SQL function (see sql/schema.sql). */
 export async function matchContentChunks(
   queryEmbedding: number[],
