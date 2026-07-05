@@ -14,7 +14,7 @@ export function MarkdownMessage({ content }: { content: string }) {
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-me-terracotta-600 underline underline-offset-2 hover:text-me-terracotta-700 font-medium"
+              className="text-me-primary-600 underline underline-offset-2 hover:text-me-primary-700 font-medium"
             >
               {children}
             </a>

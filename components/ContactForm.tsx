@@ -1,16 +1,16 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 
 interface ContactFormProps {
   onCancel: () => void;
 }
 
-type SubmitState = "idle" | "submitting" | "success" | "error";
+type SubmitState = "idle" | "success";
 
 const inputClassName =
-  "rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-terracotta-400 focus:ring-1 focus:ring-me-terracotta-400";
+  "rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-primary-400 focus:ring-1 focus:ring-me-primary-400";
 
 export function ContactForm({ onCancel }: ContactFormProps) {
   const [name, setName] = useState("");
@@ -18,28 +18,18 @@ export function ContactForm({ onCancel }: ContactFormProps) {
   const [phone, setPhone] = useState("");
   const [message, setMessage] = useState("");
   const [state, setState] = useState<SubmitState>("idle");
-  const [errorMessage, setErrorMessage] = useState("");
 
-  const isSubmitting = state === "submitting";
-
-  async function handleSubmit(e: FormEvent) {
+  function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setState("submitting");
-    setErrorMessage("");
-
-    try {
-      const res = await fetch("/api/contact", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, phone, message }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Something went wrong. Please try again.");
-      setState("success");
-    } catch (err) {
-      setState("error");
-      setErrorMessage(err instanceof Error ? err.message : "Something went wrong. Please try again.");
-    }
+    // No backend yet — just log the lead so submissions are visible while testing.
+    console.log("[ContactForm] Lead submitted:", {
+      name,
+      email,
+      phone,
+      message,
+      submittedAt: new Date().toISOString(),
+    });
+    setState("success");
   }
 
   if (state === "success") {
@@ -53,7 +43,7 @@ export function ContactForm({ onCancel }: ContactFormProps) {
         <button
           type="button"
           onClick={onCancel}
-          className="shrink-0 rounded-full bg-me-terracotta-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-me-terracotta-600"
+          className="shrink-0 cursor-pointer rounded-full bg-me-primary-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-me-primary-600"
         >
           Back to chat
         </button>
@@ -121,23 +111,18 @@ export function ContactForm({ onCancel }: ContactFormProps) {
         />
       </label>
 
-      {state === "error" && <p className="text-xs text-red-600">{errorMessage}</p>}
-
       <div className="flex gap-2">
         <button
           type="button"
           onClick={onCancel}
-          disabled={isSubmitting}
-          className="flex-1 rounded-full border border-me-neutral-200 px-4 py-2 text-sm font-medium text-me-neutral-800 transition-colors hover:bg-me-neutral-50 disabled:opacity-60"
+          className="flex-1 cursor-pointer rounded-full border border-me-neutral-200 px-4 py-2 text-sm font-medium text-me-neutral-800 transition-colors hover:bg-me-neutral-50"
         >
           Cancel
         </button>
         <button
           type="submit"
-          disabled={isSubmitting}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-full bg-me-terracotta-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-me-terracotta-600 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex-1 cursor-pointer rounded-full bg-[#F69249] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#e5813a]"
         >
-          {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
           Submit
         </button>
       </div>

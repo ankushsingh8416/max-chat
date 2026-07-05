@@ -93,11 +93,6 @@ export const CHAT_RATE_LIMIT_WINDOW_MS = 60_000;
 
 export const MAX_MESSAGE_LENGTH = 2000;
 
-// Contact form (lead capture) — stricter than chat since each submission is
-// meant to reach a human, not just generate a reply.
-export const CONTACT_RATE_LIMIT_MAX = 5;
-export const CONTACT_RATE_LIMIT_WINDOW_MS = 10 * 60_000; // 10 minutes
-
 // Admin "upload & train" page (lib/admin/, app/admin/, app/api/admin/) — lets
 // the client drag-and-drop documents to add to the knowledge base without a
 // code deploy. Tagged with this post_type so it's easy to list/delete

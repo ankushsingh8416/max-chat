@@ -118,7 +118,7 @@ export function UploadDashboard() {
         <button
           type="button"
           onClick={handleLogout}
-          className="text-xs font-medium text-me-neutral-800 underline underline-offset-2 hover:text-me-neutral-900"
+          className="cursor-pointer text-xs font-medium text-me-neutral-800 underline underline-offset-2 hover:text-me-neutral-900"
         >
           Sign out
         </button>
@@ -138,11 +138,11 @@ export function UploadDashboard() {
         onClick={() => fileInputRef.current?.click()}
         className={`flex cursor-pointer flex-col items-center gap-2 rounded-2xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
           isDragging
-            ? "border-me-terracotta-400 bg-me-terracotta-50"
+            ? "border-me-primary-400 bg-me-primary-50"
             : "border-me-neutral-200 bg-white hover:bg-me-neutral-50"
         }`}
       >
-        <UploadCloud className="h-8 w-8 text-me-terracotta-500" aria-hidden="true" />
+        <UploadCloud className="h-8 w-8 text-me-primary-500" aria-hidden="true" />
         <p className="text-sm font-medium text-me-neutral-900">Drag and drop documents here, or click to browse</p>
         <p className="text-xs text-me-neutral-800">Supports PDF, Word (.docx), and plain text (.txt)</p>
         <input
@@ -166,7 +166,7 @@ export function UploadDashboard() {
               className="flex items-center gap-2 rounded-xl border border-me-neutral-200 bg-white px-3 py-2 text-sm"
             >
               {job.status === "uploading" && (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-me-terracotta-500" aria-hidden="true" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-me-primary-500" aria-hidden="true" />
               )}
               {job.status === "done" && <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" aria-hidden="true" />}
               {job.status === "error" && <XCircle className="h-4 w-4 shrink-0 text-red-600" aria-hidden="true" />}
@@ -203,7 +203,7 @@ export function UploadDashboard() {
                   onClick={() => handleDelete(doc.sourceUrl)}
                   disabled={deletingUrl === doc.sourceUrl}
                   aria-label={`Remove ${doc.title}`}
-                  className="shrink-0 rounded-full p-1.5 text-me-neutral-800 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                  className="shrink-0 cursor-pointer rounded-full p-1.5 text-me-neutral-800 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {deletingUrl === doc.sourceUrl ? (
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />

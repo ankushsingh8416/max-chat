@@ -43,7 +43,7 @@ export function AdminLoginForm() {
           autoFocus
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-terracotta-400 focus:ring-1 focus:ring-me-terracotta-400"
+          className="rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-primary-400 focus:ring-1 focus:ring-me-primary-400"
         />
       </label>
 
@@ -52,7 +52,7 @@ export function AdminLoginForm() {
       <button
         type="submit"
         disabled={isSubmitting || !password}
-        className="flex items-center justify-center gap-1.5 rounded-full bg-me-terracotta-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-me-terracotta-600 disabled:cursor-not-allowed disabled:opacity-60"
+        className="flex cursor-pointer items-center justify-center gap-1.5 rounded-full bg-me-primary-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-me-primary-600 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
         Sign in

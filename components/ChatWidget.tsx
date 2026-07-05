@@ -3,7 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Phone, Send, X } from "lucide-react";
+import { Phone, Send, User, X } from "lucide-react";
 import { ChatBotButton } from "./ChatBotButton";
 import { ContactForm } from "./ContactForm";
 import { MarkdownMessage } from "./MarkdownMessage";
@@ -51,9 +51,55 @@ function messageText(message: UIMessage): string {
     .join("");
 }
 
-function MessageBubble({ message }: { message: UIMessage }) {
+/**
+ * Reveals `text` word-by-word over a short, length-capped duration rather than
+ * all at once, when `active`. Chat generation is fully buffered server-side
+ * (see lib/openai/chat-failover.ts — needed so a failed key can be retried
+ * before anything reaches the client), so the client never gets real
+ * token-by-token streaming to animate; this simulates the same "typing"
+ * feel purely client-side once the final text is known.
+ */
+function useTypewriter(text: string, active: boolean, onDone?: () => void): string {
+  const [display, setDisplay] = useState("");
+  const onDoneRef = useRef(onDone);
+
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  });
+
+  useEffect(() => {
+    if (!active || !text) return;
+
+    const tokens = text.match(/\S+\s*/g) ?? [text];
+    const TICK_MS = 30;
+    const MAX_DURATION_MS = 1000; // cap so long replies don't feel slow to read
+    const tokensPerTick = Math.max(1, Math.ceil(tokens.length / (MAX_DURATION_MS / TICK_MS)));
+
+    let i = 0;
+    const id = setInterval(() => {
+      i += tokensPerTick;
+      setDisplay(tokens.slice(0, i).join(""));
+      if (i >= tokens.length) {
+        clearInterval(id);
+        onDoneRef.current?.();
+      }
+    }, TICK_MS);
+    return () => clearInterval(id);
+  }, [text, active]);
+
+  return active ? display : text;
+}
+
+interface MessageBubbleProps {
+  message: UIMessage;
+  animate: boolean;
+  onAnimationDone: () => void;
+}
+
+function MessageBubble({ message, animate, onAnimationDone }: MessageBubbleProps) {
   const isUser = message.role === "user";
   const text = messageText(message);
+  const displayText = useTypewriter(text, animate && !isUser, onAnimationDone);
   if (!text) return null;
 
   return (
@@ -61,11 +107,11 @@ function MessageBubble({ message }: { message: UIMessage }) {
       <div
         className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm shadow-sm ${
           isUser
-            ? "rounded-tr-sm bg-me-terracotta-500 text-white"
+            ? "rounded-tr-sm bg-me-primary-500 text-white"
             : "rounded-tl-sm bg-white text-me-neutral-900"
         }`}
       >
-        {isUser ? <p className="whitespace-pre-wrap">{text}</p> : <MarkdownMessage content={text} />}
+        {isUser ? <p className="whitespace-pre-wrap">{text}</p> : <MarkdownMessage content={displayText} />}
       </div>
     </div>
   );
@@ -87,10 +133,12 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
   const [hasUnread, setHasUnread] = useState(false);
   const [initialMessages] = useState(loadStoredMessages);
   const [showContactForm, setShowContactForm] = useState(false);
+  const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null);
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const messagesContentRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const isOpenRef = useRef(isOpen);
@@ -104,6 +152,7 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
     onFinish: ({ message }) => {
       if (!isOpenRef.current) setHasUnread(true);
       if (hasContactFormToolCall(message)) setShowContactForm(true);
+      setAnimatingMessageId(message.id);
     },
   });
 
@@ -116,9 +165,16 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
     }
   }, [messages]);
 
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, status]);
+    const content = messagesContentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [isOpen]);
 
   const lastMessage = messages[messages.length - 1];
 
@@ -205,14 +261,21 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
           aria-label="Max Estates Assistant chat"
           className={panelClassName}
         >
-          <div className="flex items-center justify-between gap-3 bg-me-terracotta-500 px-4 py-3.5 text-white sm:rounded-t-2xl">
-            <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-white/15">
-                <Bot className="h-5 w-5" aria-hidden="true" />
+          <div className="relative z-10 flex items-center justify-between gap-3 bg-me-primary-500 px-4 py-3.5 text-white shadow-md sm:rounded-t-2xl">
+            <div className="flex items-center gap-3">
+              <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/15 ring-1 ring-inset ring-white/25">
+                <User className="h-5 w-5" aria-hidden="true" />
+                <span
+                  className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full bg-emerald-400 ring-2 ring-me-primary-500"
+                  aria-hidden="true"
+                />
               </div>
               <div>
-                <p className="text-sm font-semibold leading-tight">Max Estates Assistant</p>
-                <p className="text-xs leading-tight text-white/80">Usually replies instantly</p>
+                <p className="text-sm font-semibold tracking-tight leading-tight">Max Estates Assistant</p>
+                <p className="mt-0.5 flex items-center gap-1.5 text-xs leading-tight text-white/75">
+                  <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" aria-hidden="true" />
+                  Online &middot; Replies instantly
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-1">
@@ -222,7 +285,7 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
                   onClick={() => setShowContactForm(true)}
                   aria-label="Contact us"
                   title="Contact us"
-                  className="rounded-full p-1.5 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                  className="cursor-pointer rounded-full p-1.5 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
                 >
                   <Phone className="h-5 w-5" aria-hidden="true" />
                 </button>
@@ -231,52 +294,61 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
                 type="button"
                 onClick={closeChat}
                 aria-label="Close chat"
-                className="rounded-full p-1.5 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                className="cursor-pointer rounded-full p-1.5 hover:bg-white/15 focus:outline-none focus-visible:ring-2 focus-visible:ring-white"
               >
                 <X className="h-5 w-5" aria-hidden="true" />
               </button>
             </div>
           </div>
 
-          <div className="flex-1 space-y-3 overflow-y-auto bg-me-neutral-50 px-3.5 py-4" aria-live="polite">
-            {messages.length === 0 && (
-              <div className="flex flex-col gap-3">
-                <div className="w-fit max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-me-neutral-800 shadow-sm">
-                  Hi! I&apos;m the Max Estates assistant. Ask me about our residential and commercial
-                  projects, pricing, locations, or the latest news.
+          <div className="me-scrollbar-thin flex-1 overflow-y-auto bg-me-neutral-50" aria-live="polite">
+            <div ref={messagesContentRef} className="space-y-3 px-3.5 py-4">
+              {messages.length === 0 && (
+                <div className="flex flex-col gap-3">
+                  <div className="w-fit max-w-[85%] rounded-2xl rounded-tl-sm bg-white px-3.5 py-2.5 text-sm text-me-neutral-800 shadow-sm">
+                    Hi! I&apos;m the Max Estates assistant. Ask me about our residential and commercial
+                    projects, pricing, locations, or the latest news.
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {STARTER_PROMPTS.map((prompt) => (
+                      <button
+                        key={prompt}
+                        type="button"
+                        onClick={() => submit(prompt)}
+                        className="cursor-pointer rounded-full border border-me-primary-200 bg-white px-3 py-1.5 text-xs font-medium text-me-primary-700 transition-colors hover:bg-me-primary-50"
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {STARTER_PROMPTS.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      onClick={() => submit(prompt)}
-                      className="rounded-full border border-me-terracotta-200 bg-white px-3 py-1.5 text-xs font-medium text-me-terracotta-700 transition-colors hover:bg-me-terracotta-50"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
+              )}
+
+              {messages.map((message) => (
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  animate={message.id === animatingMessageId}
+                  onAnimationDone={() =>
+                    setAnimatingMessageId((current) => (current === message.id ? null : current))
+                  }
+                />
+              ))}
+
+              {showTyping && (
+                <div className="w-fit max-w-[85%] rounded-2xl rounded-tl-sm bg-white shadow-sm">
+                  <TypingIndicator />
                 </div>
-              </div>
-            )}
+              )}
 
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
+              {status === "error" && (
+                <div className="rounded-2xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
+                  Something went wrong on our end. Please try again in a moment.
+                </div>
+              )}
 
-            {showTyping && (
-              <div className="w-fit max-w-[85%] rounded-2xl rounded-tl-sm bg-white shadow-sm">
-                <TypingIndicator />
-              </div>
-            )}
-
-            {status === "error" && (
-              <div className="rounded-2xl bg-red-50 px-3.5 py-2.5 text-sm text-red-700">
-                Something went wrong on our end. Please try again in a moment.
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
+              <div ref={messagesEndRef} />
+            </div>
           </div>
 
           {showContactForm ? (
@@ -303,13 +375,13 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
                 maxLength={2000}
                 placeholder="Ask about a project, price, location..."
                 aria-label="Type your message"
-                className="max-h-24 flex-1 resize-none rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-terracotta-400 focus:ring-1 focus:ring-me-terracotta-400"
+                className="max-h-24 flex-1 resize-none rounded-xl border border-me-neutral-200 bg-me-neutral-50 px-3 py-2 text-sm text-me-neutral-900 outline-none focus:border-me-primary-400 focus:ring-1 focus:ring-me-primary-400"
               />
               <button
                 type="submit"
                 disabled={!input.trim() || isBusy}
                 aria-label="Send message"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-me-terracotta-500 text-white transition-colors hover:bg-me-terracotta-600 disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-full bg-me-primary-500 text-white transition-colors hover:bg-me-primary-600 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Send className="h-4 w-4" aria-hidden="true" />
               </button>
