@@ -11,6 +11,21 @@ import { TypingIndicator } from "./TypingIndicator";
 import { postToParent } from "@/lib/embed-bridge";
 
 const SESSION_STORAGE_KEY = "max-estates-chat-messages";
+const GREETING_DISMISSED_KEY = "max-estates-greeting-dismissed";
+const GREETING_DELAY_MS = 1200;
+const GREETING_ROTATE_MS = 4000;
+
+const GREETING_MESSAGES = [
+  "👋 How can I help you today?",
+  "💬 Need help?",
+  "🤝 We're here to help.",
+  "✨ Need assistance?",
+  "💬 Ask me anything.",
+  "❓Have a question?",
+  "📞 Chat with us.",
+  "📅 Book a site visit.",
+  "💰 Ask about pricing.",
+];
 
 const STARTER_PROMPTS = [
   "Show me residential projects in Noida",
@@ -134,6 +149,8 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
   const [initialMessages] = useState(loadStoredMessages);
   const [showContactForm, setShowContactForm] = useState(false);
   const [animatingMessageId, setAnimatingMessageId] = useState<string | null>(null);
+  const [showGreeting, setShowGreeting] = useState(false);
+  const [greetingIndex, setGreetingIndex] = useState(0);
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -176,6 +193,38 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
     return () => observer.disconnect();
   }, [isOpen]);
 
+  // Nudges a first-time visitor to engage — shown once per session, and only
+  // while the chat is still closed.
+  useEffect(() => {
+    if (isOpen) return;
+    try {
+      if (window.sessionStorage.getItem(GREETING_DISMISSED_KEY)) return;
+    } catch {
+      // sessionStorage inaccessible (private browsing, etc.) — just show it, no persistence needed.
+    }
+    const t = setTimeout(() => setShowGreeting(true), GREETING_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [isOpen]);
+
+  // Cycles through GREETING_MESSAGES while the bubble is visible, so it
+  // doesn't feel static if the visitor takes a moment to notice it.
+  useEffect(() => {
+    if (!showGreeting) return;
+    const id = setInterval(() => {
+      setGreetingIndex((i) => (i + 1) % GREETING_MESSAGES.length);
+    }, GREETING_ROTATE_MS);
+    return () => clearInterval(id);
+  }, [showGreeting]);
+
+  const dismissGreeting = useCallback(() => {
+    setShowGreeting(false);
+    try {
+      window.sessionStorage.setItem(GREETING_DISMISSED_KEY, "1");
+    } catch {
+      // Losing this preference just means the greeting may reappear next session — harmless.
+    }
+  }, []);
+
   const lastMessage = messages[messages.length - 1];
 
   const closeChat = useCallback(() => {
@@ -187,8 +236,9 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
   const openChat = useCallback(() => {
     setIsOpen(true);
     setHasUnread(false);
+    dismissGreeting();
     if (embedded) postToParent("open");
-  }, [embedded]);
+  }, [embedded, dismissGreeting]);
 
   const toggle = useCallback(() => (isOpen ? closeChat() : openChat()), [isOpen, closeChat, openChat]);
 
@@ -387,6 +437,28 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
               </button>
             </form>
           )}
+        </div>
+      )}
+
+      {!isOpen && showGreeting && (
+        <div className="relative max-w-55 animate-me-fade-in rounded-2xl rounded-br-sm bg-white shadow-lg ring-1 ring-black/5">
+          <button
+            type="button"
+            onClick={dismissGreeting}
+            aria-label="Dismiss"
+            className="absolute -right-2 -top-2 flex h-5 w-5 cursor-pointer items-center justify-center rounded-full bg-me-neutral-200 text-me-neutral-700 shadow-sm hover:bg-me-neutral-300"
+          >
+            <X className="h-3 w-3" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            onClick={openChat}
+            className="block w-full cursor-pointer px-3.5 py-2.5 text-left text-sm text-me-neutral-900"
+          >
+            <span key={greetingIndex} className="block animate-me-fade-in">
+              {GREETING_MESSAGES[greetingIndex]}
+            </span>
+          </button>
         </div>
       )}
 

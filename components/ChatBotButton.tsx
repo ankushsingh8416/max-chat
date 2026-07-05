@@ -1,6 +1,6 @@
 "use client";
 
-import { MessageCircle, X } from "lucide-react";
+import { Bot, X } from "lucide-react";
 import { forwardRef } from "react";
 
 interface ChatBotButtonProps {
@@ -27,7 +27,7 @@ export const ChatBotButton = forwardRef<HTMLButtonElement, ChatBotButtonProps>(
           <span className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-me-primary-700 ring-2 ring-white" />
         )}
         <span className="relative flex h-6 w-6 items-center justify-center">
-          <MessageCircle
+          <Bot
             className={`absolute h-6 w-6 transition-all duration-200 ${
               isOpen ? "scale-0 opacity-0" : "scale-100 opacity-100"
             }`}
