@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, FileText, Loader2, Trash2, UploadCloud, XCircle } from "lucide-react";
+import toast from "react-hot-toast";
+import { FileText, Loader2, Trash2, UploadCloud } from "lucide-react";
 
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx", ".txt"];
 
@@ -16,8 +17,6 @@ interface DocSummary {
 interface UploadJob {
   id: string;
   filename: string;
-  status: "uploading" | "done" | "error";
-  error?: string;
 }
 
 function isAcceptedFile(filename: string): boolean {
@@ -55,8 +54,8 @@ export function UploadDashboard() {
 
   const uploadFile = useCallback(
     async (file: File) => {
-      const jobId = `${file.name}-${crypto.randomUUID()}`;
-      setJobs((prev) => [...prev, { id: jobId, filename: file.name, status: "uploading" }]);
+      const jobId = crypto.randomUUID();
+      setJobs((prev) => [...prev, { id: jobId, filename: file.name }]);
 
       try {
         const formData = new FormData();
@@ -65,16 +64,12 @@ export function UploadDashboard() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || "Upload failed");
 
-        setJobs((prev) => prev.map((j) => (j.id === jobId ? { ...j, status: "done" } : j)));
+        toast.success(`"${file.name}" uploaded — ready to answer questions.`);
         loadDocs();
       } catch (err) {
-        setJobs((prev) =>
-          prev.map((j) =>
-            j.id === jobId
-              ? { ...j, status: "error", error: err instanceof Error ? err.message : "Upload failed" }
-              : j
-          )
-        );
+        toast.error(`Failed to upload "${file.name}": ${err instanceof Error ? err.message : "Upload failed"}`);
+      } finally {
+        setJobs((prev) => prev.filter((j) => j.id !== jobId));
       }
     },
     [loadDocs]
@@ -85,10 +80,7 @@ export function UploadDashboard() {
       if (!fileList) return;
       Array.from(fileList).forEach((file) => {
         if (!isAcceptedFile(file.name)) {
-          setJobs((prev) => [
-            ...prev,
-            { id: crypto.randomUUID(), filename: file.name, status: "error", error: "Unsupported file type" },
-          ]);
+          toast.error(`"${file.name}" is not a supported file type.`);
           return;
         }
         uploadFile(file);
@@ -97,11 +89,17 @@ export function UploadDashboard() {
     [uploadFile]
   );
 
-  async function handleDelete(sourceUrl: string) {
+  async function handleDelete(sourceUrl: string, title: string) {
     setDeletingUrl(sourceUrl);
     try {
-      await fetch(`/api/admin/docs/${encodeURIComponent(sourceUrl)}`, { method: "DELETE" });
+      const res = await fetch(`/api/admin/docs/${encodeURIComponent(sourceUrl)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to remove document");
+
       setDocs((prev) => prev.filter((d) => d.sourceUrl !== sourceUrl));
+      toast.success(`"${title}" removed.`);
+    } catch (err) {
+      toast.error(`Failed to remove "${title}": ${err instanceof Error ? err.message : "Failed to remove document"}`);
     } finally {
       setDeletingUrl(null);
     }
@@ -165,13 +163,8 @@ export function UploadDashboard() {
               key={job.id}
               className="flex items-center gap-2 rounded-xl border border-me-neutral-200 bg-white px-3 py-2 text-sm"
             >
-              {job.status === "uploading" && (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-me-primary-500" aria-hidden="true" />
-              )}
-              {job.status === "done" && <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" aria-hidden="true" />}
-              {job.status === "error" && <XCircle className="h-4 w-4 shrink-0 text-red-600" aria-hidden="true" />}
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-me-primary-500" aria-hidden="true" />
               <span className="flex-1 truncate text-me-neutral-900">{job.filename}</span>
-              {job.status === "error" && <span className="text-xs text-red-600">{job.error}</span>}
             </div>
           ))}
         </div>
@@ -200,7 +193,7 @@ export function UploadDashboard() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => handleDelete(doc.sourceUrl)}
+                  onClick={() => handleDelete(doc.sourceUrl, doc.title)}
                   disabled={deletingUrl === doc.sourceUrl}
                   aria-label={`Remove ${doc.title}`}
                   className="shrink-0 cursor-pointer rounded-full p-1.5 text-me-neutral-800 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
