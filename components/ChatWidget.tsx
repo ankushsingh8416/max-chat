@@ -66,6 +66,40 @@ function messageText(message: UIMessage): string {
     .join("");
 }
 
+const SUGGESTIONS_MARKER = "@@SUGGESTIONS@@";
+
+/**
+ * The model appends `@@SUGGESTIONS@@["...", "..."]` as the last line of every
+ * reply (see the "Follow-up suggestions" rules in lib/rag.ts's system
+ * prompt) so the UI can offer contextual next-question chips below the
+ * answer. Strips the marker either way, even if the JSON after it is
+ * malformed, so it's never shown to the user.
+ */
+function extractSuggestions(text: string): { cleanText: string; suggestions: string[] } {
+  const idx = text.lastIndexOf(SUGGESTIONS_MARKER);
+  if (idx === -1) return { cleanText: text, suggestions: [] };
+
+  const cleanText = text.slice(0, idx).trimEnd();
+  const raw = text
+    .slice(idx + SUGGESTIONS_MARKER.length)
+    .trim()
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"');
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const suggestions = parsed
+        .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+        .slice(0, 2);
+      return { cleanText, suggestions };
+    }
+  } catch {
+    // Malformed JSON from the model — still strip the marker/garbage below.
+  }
+  return { cleanText, suggestions: [] };
+}
+
 /**
  * Reveals `text` word-by-word over a short, length-capped duration rather than
  * all at once, when `active`. Chat generation is fully buffered server-side
@@ -109,16 +143,18 @@ interface MessageBubbleProps {
   message: UIMessage;
   animate: boolean;
   onAnimationDone: () => void;
+  isLast: boolean;
+  onSuggestionClick: (text: string) => void;
 }
 
-function MessageBubble({ message, animate, onAnimationDone }: MessageBubbleProps) {
+function MessageBubble({ message, animate, onAnimationDone, isLast, onSuggestionClick }: MessageBubbleProps) {
   const isUser = message.role === "user";
-  const text = messageText(message);
+  const { cleanText: text, suggestions } = extractSuggestions(messageText(message));
   const displayText = useTypewriter(text, animate && !isUser, onAnimationDone);
   if (!text) return null;
 
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
       <div
         className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm shadow-sm ${
           isUser
@@ -128,6 +164,21 @@ function MessageBubble({ message, animate, onAnimationDone }: MessageBubbleProps
       >
         {isUser ? <p className="whitespace-pre-wrap">{text}</p> : <MarkdownMessage content={displayText} />}
       </div>
+
+      {!isUser && isLast && !animate && suggestions.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {suggestions.map((suggestion) => (
+            <button
+              key={suggestion}
+              type="button"
+              onClick={() => onSuggestionClick(suggestion)}
+              className="cursor-pointer rounded-full border border-me-primary-200 bg-white px-3 py-1.5 text-xs font-medium text-me-primary-700 transition-colors hover:bg-me-primary-50"
+            >
+              {suggestion}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -374,7 +425,7 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
                 </div>
               )}
 
-              {messages.map((message) => (
+              {messages.map((message, index) => (
                 <MessageBubble
                   key={message.id}
                   message={message}
@@ -382,6 +433,8 @@ export function ChatWidget({ embedded = false }: ChatWidgetProps) {
                   onAnimationDone={() =>
                     setAnimatingMessageId((current) => (current === message.id ? null : current))
                   }
+                  isLast={index === messages.length - 1}
+                  onSuggestionClick={submit}
                 />
               ))}
 
