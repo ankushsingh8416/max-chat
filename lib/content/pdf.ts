@@ -1,3 +1,4 @@
+import "./pdf-polyfills"; // must stay first — see that file's comment
 import { PDFParse } from "pdf-parse";
 import path from "node:path";
 import { pathToFileURL } from "node:url";

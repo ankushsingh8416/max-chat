@@ -14,6 +14,11 @@ const nextConfig: NextConfig = {
   // load). This outputFileTracingIncludes entry is still needed, though —
   // even with normal bundling, the dynamically-imported worker file itself
   // is invisible to the tracer and must be forced into the deployment.
+  //
+  // Separately, see lib/content/pdf-polyfills.ts: pdfjs-dist also references
+  // `DOMMatrix` in top-level module code, which crashes module load entirely
+  // in Node unless polyfilled — that's handled with a pure-JS shim there,
+  // not here, since it needs to run before pdf-parse is ever imported.
   outputFileTracingIncludes: {
     "/api/*": ["./node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs"],
   },
